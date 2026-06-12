@@ -133,12 +133,25 @@ Caveat encoded in the script: replay/gradient/objective runs truncate
 the summary files of their output directory at startup — keep reference
 summaries outside the active output dir.
 
+### Multi-term misfits and well adjoints
+
+- `matchsum:<refcase>:<W>.<p>[+<W>.<p>]...` — the general weighted
+  well-curve misfit over several wells/phases against one reference
+  summary (rate-family objectives are now all sums of terms). Verified
+  on SPE1 with PROD.gas+PROD.water and PROD.gas+PROD.oil (twin 12
+  orders, FD 1.5e-4; extra terms contribute as physically expected).
+- **lambda_w** computed per well per substep
+  (= −D⁻ᵀ(dJ/dx_w + Σ C λ_r), Cmatrix accessor) and written to
+  `<CASE>.ADJOINT_LAMBDA_WELLS.txt` — the basis for later well-control
+  gradients dJ/du.
+
 **This completes the plan's priority objective on simple blackoil
 decks** (current scoping: no hysteresis / DRSDT / complex explicit
 updates). Still open: producers-only restriction (injector keywords),
-multi-well/multi-phase weighted sums (mechanical extension), lambda_w
-output for later dJ/du, T6 JutulDarcy cross-check (julia installed via
-juliaup; package setup pending), parts of
+per-term weights from config, dJ/du via lambda_w, T6 JutulDarcy
+cross-check (julia installed; package precompile pending), perm chain
+rule (needs half-trans exposure from Transmissibility — small
+adjoint-hooks addition, computeHalfTrans_ is private today), parts of
 [#6751](https://github.com/OPM/opm-simulators/pull/6751) /
 [#7039](https://github.com/OPM/opm-simulators/pull/7039) onto
 adjoint-hooks when needed.
