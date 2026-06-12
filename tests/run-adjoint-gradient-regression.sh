@@ -89,7 +89,7 @@ echo "${CASES}" | while read -r name objective orat; do
         --adjoint-mode=gradient --adjoint-objective="${objective}" \
         > "${rundir}/grad.log" 2>&1 || { echo "${name}: gradient FAILED"; exit 1; }
 
-    for kind in PV TRANS; do
+    for kind in PV TRANS PERM; do
         test_file=${rundir}/${DECKNAME}.ADJOINT_GRADIENTS_${kind}.txt
         ref_file=${REFDIR}/${name}_${kind}.txt
         if [ "${UPDATE}" = "--update" ]; then

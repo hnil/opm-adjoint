@@ -58,7 +58,12 @@ class AdjointFlowProblem : public FlowProblemBlackoil<TypeTag>
 public:
     explicit AdjointFlowProblem(Simulator& simulator)
         : ParentType(simulator)
-    {}
+    {
+        // One-sided half transmissibilities are needed for the adjoint
+        // permeability chain rule; must be enabled before finishInit()
+        // triggers the transmissibility update.
+        this->transmissibilities_.setStoreHalfTrans(true);
+    }
 
     static void registerParameters()
     {

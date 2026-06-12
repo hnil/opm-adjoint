@@ -1,0 +1,4 @@
+# dJ/dPERMX dJ/dPERMY dJ/dPERMZ per cell, SI (per m^2); multiply by 9.869233e-16 for per-mD
+-1.983718896214416e+17 0 0
+-3.587381482062482e+17 0 0
+-1.605445602093058e+17 0 0

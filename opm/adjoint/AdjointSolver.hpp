@@ -49,6 +49,8 @@
 #include <opm/adjoint/AdjointObjective.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
 
+#include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
+
 #include <opm/simulators/wells/StandardWell.hpp>
 
 #include <dune/common/fvector.hh>
@@ -56,6 +58,7 @@
 
 #include <fmt/format.h>
 
+#include <array>
 #include <fstream>
 #include <map>
 #include <string>
@@ -364,6 +367,7 @@ private:
                 for (const auto& nbInfo : nbInfos) {
                     if (nbInfo.neighbor > globI) {
                         faces_.push_back({globI, nbInfo.neighbor});
+                        faceDirs_.push_back(nbInfo.res_nbinfo.faceDir);
                     }
                 }
             }
@@ -422,6 +426,7 @@ private:
                    << gradientTrans_[f] << "\n";
             }
         }
+        writePermGradients_(base);
         {
             std::ofstream os(base + ".ADJOINT_GRADIENTS_WELLCTRL.txt");
             os.precision(16);
@@ -444,6 +449,58 @@ private:
                      ".ADJOINT_GRADIENTS_{PV,TRANS}.txt");
     }
 
+    //! \brief Permeability chain rule, post-processed from the
+    //!        transmissibility-multiplier gradients:
+    //!        dJ/dK_in^dir = sum_faces g_tmult[f] (h_out/(h_in+h_out)) / K_in^dir
+    //!        (T proportional to the harmonic mean of the one-sided half
+    //!        transmissibilities, which are linear in the directional
+    //!        permeability; multipliers cancel since g_tmult is the
+    //!        multiplier-based gradient).
+    void writePermGradients_(const std::string& base)
+    {
+        const auto& trans = simulator_.problem().eclTransmissibilities();
+        const std::size_t numCells = simulator_.model().numGridDof();
+        // per cell: d/dPERMX, d/dPERMY, d/dPERMZ (SI: per m^2)
+        std::vector<std::array<Scalar, 3>> gradient(numCells, {0.0, 0.0, 0.0});
+
+        for (std::size_t f = 0; f < faces_.size(); ++f) {
+            const auto [globI, globJ] = faces_[f];
+            int dim;
+            switch (faceDirs_[f]) {
+            case FaceDir::XPlus:
+            case FaceDir::XMinus: dim = 0; break;
+            case FaceDir::YPlus:
+            case FaceDir::YMinus: dim = 1; break;
+            case FaceDir::ZPlus:
+            case FaceDir::ZMinus: dim = 2; break;
+            default:
+                continue; // NNC: no single permeability direction
+            }
+            const Scalar hIn = trans.halfTransmissibility(globI, globJ);
+            const Scalar hOut = trans.halfTransmissibility(globJ, globI);
+            if (hIn + hOut <= 0.0) {
+                continue;
+            }
+            const Scalar kIn = trans.permeability(globI)[dim][dim];
+            const Scalar kOut = trans.permeability(globJ)[dim][dim];
+            const Scalar g = gradientTrans_[f];
+            if (kIn > 0.0) {
+                gradient[globI][dim] += g * (hOut / (hIn + hOut)) / kIn;
+            }
+            if (kOut > 0.0) {
+                gradient[globJ][dim] += g * (hIn / (hIn + hOut)) / kOut;
+            }
+        }
+
+        std::ofstream os(base + ".ADJOINT_GRADIENTS_PERM.txt");
+        os.precision(16);
+        os << "# dJ/dPERMX dJ/dPERMY dJ/dPERMZ per cell, SI (per m^2); "
+              "multiply by 9.869233e-16 for per-mD\n";
+        for (const auto& g : gradient) {
+            os << g[0] << " " << g[1] << " " << g[2] << "\n";
+        }
+    }
+
     Simulator& simulator_;
     Replay replay_;
     AdjointObjectiveFunction<TypeTag> objective_;
@@ -451,6 +508,7 @@ private:
 
     std::vector<Scalar> gradientPv_;
     std::vector<std::pair<std::size_t, unsigned>> faces_;
+    std::vector<FaceDir::DirEnum> faceDirs_;
     std::vector<Scalar> gradientTrans_;
     std::vector<std::string> wellAdjointLog_;
     std::map<std::string, Scalar> controlGradient_;
