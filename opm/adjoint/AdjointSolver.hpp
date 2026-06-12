@@ -189,13 +189,15 @@ private:
     //!        adjoint right-hand side (StandardWells only).
     void addWellObjectiveRhs_(double dt, Vector& rhs)
     {
-        if (objective_.kind() != AdjointObjectiveFunction<TypeTag>::Kind::WellBhp) {
+        using Kind = typename AdjointObjectiveFunction<TypeTag>::Kind;
+        if (objective_.kind() != Kind::WellBhp &&
+            objective_.kind() != Kind::WellRate &&
+            objective_.kind() != Kind::WellRateMatch) {
             return;
         }
         const auto& wellModel = simulator_.problem().wellModel();
         for (const auto& wellPtr : wellModel.localNonshutWells()) {
-            const Scalar weight = objective_.bhpGradient(wellPtr->name(), dt);
-            if (weight == 0.0) {
+            if (wellPtr->name() != objective_.wellName()) {
                 continue;
             }
             const auto* stdWell =
@@ -208,9 +210,24 @@ private:
             const auto& Dmat = eqns.Dmatrix()[0][0];
             const std::size_t numWellEq = Dmat.N();
 
-            // dJ/dx_w: BHP is the last well primary variable.
+            // dJ/dx_w.
             Dune::DynamicVector<Scalar> dJdxw(numWellEq, 0.0);
-            dJdxw[numWellEq - 1] = weight;
+            if (objective_.kind() == Kind::WellBhp) {
+                // BHP is the last well primary variable.
+                dJdxw[numWellEq - 1] = objective_.bhpGradient(wellPtr->name(), dt);
+            } else {
+                // Rate objective: q_c is a function of the well primary
+                // variables; its derivatives sit in the well slots of the
+                // EvalWell returned by getQs (reservoir derivatives first,
+                // well derivatives at numEq + j).
+                const auto qs =
+                    stdWell->primaryVariables().getQs(objective_.activeCompIdx());
+                const Scalar weight =
+                    objective_.rateWeight(wellPtr->name(), dt, qs.value());
+                for (std::size_t j = 0; j < numWellEq; ++j) {
+                    dJdxw[j] = weight * qs.derivative(numEq + j);
+                }
+            }
 
             // y = D^-T dJdxw  (small dense transposed solve).
             Dune::DynamicMatrix<Scalar> Dt(numWellEq, numWellEq);

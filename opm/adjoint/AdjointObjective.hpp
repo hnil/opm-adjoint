@@ -58,8 +58,9 @@ public:
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
+    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
 
-    enum class Kind { PressureAverage, WellBhp };
+    enum class Kind { PressureAverage, WellBhp, WellRate, WellRateMatch };
 
     //! \param spec objective specification string (--adjoint-objective).
     explicit AdjointObjectiveFunction(const std::string& spec)
@@ -73,10 +74,41 @@ public:
                 OPM_THROW(std::runtime_error,
                           "--adjoint-objective=bhp:<WELL> needs a well name");
             }
+        } else if (spec.rfind("rate:", 0) == 0) {
+            // rate:<WELL>:<oil|water|gas> -- J = sum_k dt_k q_phase(k),
+            // i.e. the cumulative produced/injected surface volume.
+            kind_ = Kind::WellRate;
+            const auto rest = spec.substr(5);
+            const auto colon = rest.find(':');
+            if (colon == std::string::npos) {
+                OPM_THROW(std::runtime_error,
+                          "--adjoint-objective=rate:<WELL>:<oil|water|gas>");
+            }
+            wellName_ = rest.substr(0, colon);
+            parsePhase_(rest.substr(colon + 1));
+        } else if (spec.rfind("match:", 0) == 0) {
+            // match:<WELL>:<oil|water|gas>:<target sm3/day> --
+            // J = sum_k dt_k (q_phase(k) - q_target)^2 : the quadratic
+            // misfit form of well-curve matching with a constant target
+            // (per-step observed curves via ESmry are pure I/O on top).
+            kind_ = Kind::WellRateMatch;
+            const auto rest = spec.substr(6);
+            const auto c1 = rest.find(':');
+            const auto c2 = (c1 == std::string::npos)
+                ? std::string::npos : rest.find(':', c1 + 1);
+            if (c2 == std::string::npos) {
+                OPM_THROW(std::runtime_error,
+                          "--adjoint-objective=match:<WELL>:<phase>:<target sm3/day>");
+            }
+            wellName_ = rest.substr(0, c1);
+            parsePhase_(rest.substr(c1 + 1, c2 - c1 - 1));
+            // surface rates are SI (m3/s) internally
+            targetRate_ = std::stod(rest.substr(c2 + 1)) / 86400.0;
         } else {
             OPM_THROW(std::runtime_error,
                       "Unknown adjoint objective '" + spec +
-                      "' (expected 'pressure-average' or 'bhp:<WELL>')");
+                      "' (expected 'pressure-average', 'bhp:<WELL>', "
+                      "'rate:<WELL>:<phase>' or 'match:<WELL>:<phase>:<target>')");
         }
     }
 
@@ -107,6 +139,22 @@ public:
             const auto& wellState =
                 simulator.problem().wellModel().wellState();
             return dt * wellState.well(wellName_).bhp;
+        }
+        case Kind::WellRate: {
+            const auto& wellState =
+                simulator.problem().wellModel().wellState();
+            const int phasePos =
+                FluidSystem::canonicalToActivePhaseIdx(canonicalPhaseIdx_);
+            return dt * wellState.well(wellName_).surface_rates[phasePos];
+        }
+        case Kind::WellRateMatch: {
+            const auto& wellState =
+                simulator.problem().wellModel().wellState();
+            const int phasePos =
+                FluidSystem::canonicalToActivePhaseIdx(canonicalPhaseIdx_);
+            const Scalar diff =
+                wellState.well(wellName_).surface_rates[phasePos] - targetRate_;
+            return dt * diff * diff;
         }
         }
         return 0.0;
@@ -139,9 +187,50 @@ public:
         return 0.0;
     }
 
+    //! \brief dJ_k/d(rate) weight: dt for the plain rate objective,
+    //!        2 dt (q - q_target) for the quadratic match (q = current
+    //!        rate of the selected phase, supplied by the caller).
+    Scalar rateWeight(const std::string& well, double dt, Scalar q) const
+    {
+        if (well != wellName_) {
+            return 0.0;
+        }
+        if (kind_ == Kind::WellRate) {
+            return dt;
+        }
+        if (kind_ == Kind::WellRateMatch) {
+            return 2.0 * dt * (q - targetRate_);
+        }
+        return 0.0;
+    }
+
+    //! \brief Active component index of the objective's rate phase.
+    unsigned activeCompIdx() const
+    { return FluidSystem::canonicalToActiveCompIdx(canonicalCompIdx_); }
+
 private:
+    void parsePhase_(const std::string& phase)
+    {
+        if (phase == "oil") {
+            canonicalPhaseIdx_ = FluidSystem::oilPhaseIdx;
+            canonicalCompIdx_ = FluidSystem::oilCompIdx;
+        } else if (phase == "water") {
+            canonicalPhaseIdx_ = FluidSystem::waterPhaseIdx;
+            canonicalCompIdx_ = FluidSystem::waterCompIdx;
+        } else if (phase == "gas") {
+            canonicalPhaseIdx_ = FluidSystem::gasPhaseIdx;
+            canonicalCompIdx_ = FluidSystem::gasCompIdx;
+        } else {
+            OPM_THROW(std::runtime_error,
+                      "Unknown phase '" + phase + "' in adjoint objective");
+        }
+    }
+
     Kind kind_{Kind::PressureAverage};
     std::string wellName_{};
+    unsigned canonicalPhaseIdx_{0};
+    unsigned canonicalCompIdx_{0};
+    Scalar targetRate_{0.0};
 };
 
 } // namespace Opm
