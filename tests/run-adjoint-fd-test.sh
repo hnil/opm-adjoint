@@ -13,7 +13,13 @@
 # resulting discretization difference would swamp the FD signal.
 #
 # Usage:
-#   run-adjoint-fd-test.sh <flow_adjoint-binary> <inputfiles-dir> <deck-name> <output-dir> [delta] [rel-tol]
+#   run-adjoint-fd-test.sh <flow_adjoint-binary> <inputfiles-dir> <deck-name> <output-dir> [delta] [rel-tol] [objective] [orat]
+#
+# If [orat] is given, all WCONPROD step files are rewritten to ORAT
+# control with that target (BHP floor 50 bar), so the producer BHP is a
+# free variable - required for bhp:<WELL> objectives (under BHP control
+# the BHP is pinned by the control equation and the gradient is
+# legitimately zero).
 
 set -u
 
@@ -23,11 +29,24 @@ DECKNAME=${3:?missing deck name (without .DATA)}
 OUTDIR=${4:?missing output dir}
 DELTA=${5:-1e-6}
 RELTOL=${6:-1e-3}
+OBJECTIVE=${7:-pressure-average}
+ORAT=${8:-}
+
+transform_input() { # <inputdir>
+    [ -z "${ORAT}" ] && return
+    local dir=$1
+    local wcf wellname
+    for wcf in "${dir}"/wconprodstep_*.txt; do
+        wellname=$(awk 'NR==2 {print $1}' "${wcf}")
+        printf 'WCONPROD\n%s OPEN ORAT %s 4* 50.0 /\n/\n' "${wellname}" "${ORAT}" > "${wcf}"
+    done
+}
 
 STRICT="--threads-per-process=1 --enable-storage-cache=false \
  --enable-adaptive-time-stepping=false \
  --tolerance-cnv=1e-7 --tolerance-cnv-relaxed=1e-7 \
- --tolerance-mb=1e-9 --tolerance-mb-relaxed=1e-9"
+ --tolerance-mb=1e-9 --tolerance-mb-relaxed=1e-9 \
+ --adjoint-objective=${OBJECTIVE}"
 
 run_J() { # <inputdir> <rundir>  -> prints J
     local inputdir=$1 rundir=$2
@@ -45,6 +64,7 @@ echo "=== base run: forward + adjoint gradient"
 BASE=${OUTDIR}/base
 mkdir -p "${BASE}"
 cp -r "${INPUTDIR}" "${OUTDIR}/inputfiles_base"
+transform_input "${OUTDIR}/inputfiles_base"
 ${FLOW} "${OUTDIR}/inputfiles_base/${DECKNAME}.DATA" --output-dir="${BASE}" ${STRICT} \
     --adjoint-save=true > "${BASE}/fwd.log" 2>&1 || { echo "base forward failed"; exit 1; }
 ${FLOW} "${OUTDIR}/inputfiles_base/${DECKNAME}.DATA" --output-dir="${BASE}" ${STRICT} \
@@ -64,6 +84,7 @@ while [ $i -lt ${NCELLS} ]; do
     for sign in + -; do
         dir=${OUTDIR}/fd_${i}_${sign}
         cp -r "${INPUTDIR}" "${OUTDIR}/inputfiles_${i}_${sign}"
+        transform_input "${OUTDIR}/inputfiles_${i}_${sign}"
         python3 - "$INPUTDIR/poro.txt" "${OUTDIR}/inputfiles_${i}_${sign}/poro.txt" $i ${sign}${DELTA} << 'EOF'
 import sys
 src, dst, idx, delta = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])

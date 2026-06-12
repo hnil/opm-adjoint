@@ -33,6 +33,7 @@ AdjointConfig AdjointConfig::fromParameters()
     config.path = Parameters::Get<Parameters::AdjointFile>();
     config.replayTolerance = Parameters::Get<Parameters::AdjointReplayTolerance>();
     config.replayAbsTolerance = Parameters::Get<Parameters::AdjointReplayAbsTolerance>();
+    config.objective = Parameters::Get<Parameters::AdjointObjective>();
     return config;
 }
 
@@ -54,6 +55,9 @@ void registerAdjointParameters()
     Parameters::Register<Parameters::AdjointReplayTolerance>
         ("Relative tolerance for comparing re-linearized systems against "
          "stored ones in adjoint replay");
+    Parameters::Register<Parameters::AdjointObjective>
+        ("Objective function for adjoint gradient runs: 'pressure-average' "
+         "or 'bhp:<WELL>' (time-integrated bottom-hole pressure)");
     Parameters::Register<Parameters::AdjointReplayAbsTolerance>
         ("Absolute noise floor for the adjoint replay comparison; entry "
          "differences below this value count as rounding noise");

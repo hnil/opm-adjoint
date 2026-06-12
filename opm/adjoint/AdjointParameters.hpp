@@ -49,6 +49,10 @@ struct AdjointMode { static constexpr auto value = ""; };
 //!        selects the HDF5 backend, anything else a plain directory store.
 struct AdjointFile { static constexpr auto value = ""; };
 
+//! \brief Objective function for adjoint/gradient runs:
+//!        "pressure-average" or "bhp:<WELL>".
+struct AdjointObjective { static constexpr auto value = "pressure-average"; };
+
 //! \brief Relative tolerance used when the replay driver compares the
 //!        re-linearized systems against the stored ones.
 struct AdjointReplayTolerance { static constexpr double value = 1e-12; };
@@ -72,6 +76,7 @@ struct AdjointConfig
     std::string path{};       //!< archive path ("" = derive from case name)
     double replayTolerance{1e-12};
     double replayAbsTolerance{1e-9};
+    std::string objective{};  //!< objective specification
 
     static AdjointConfig fromParameters();
 };

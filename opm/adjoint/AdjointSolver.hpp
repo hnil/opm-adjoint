@@ -49,6 +49,8 @@
 #include <opm/adjoint/AdjointObjective.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
 
+#include <opm/simulators/wells/StandardWell.hpp>
+
 #include <dune/common/fvector.hh>
 #include <dune/istl/bvector.hh>
 
@@ -83,6 +85,7 @@ public:
     explicit AdjointSolver(Simulator& simulator)
         : simulator_(simulator)
         , replay_(simulator)
+        , objective_(AdjointConfig::fromParameters().objective)
     {
         replay_.setComputeBdiag(true);
     }
@@ -96,10 +99,12 @@ public:
             OpmLog::error("Adjoint archive contains no substeps");
             return EXIT_FAILURE;
         }
-        const auto& last = meta.substeps[numSubsteps - 1];
-        replay_.loadSnapshot(numSubsteps - 1, last.reportStep);
-        const Scalar value =
-            objective_.stepValue(simulator_, numSubsteps - 1, numSubsteps);
+        Scalar value = 0.0;
+        for (int k = 0; k < numSubsteps; ++k) {
+            const auto& step = meta.substeps[k];
+            replay_.loadSnapshot(k, step.reportStep);
+            value += objective_.stepValue(simulator_, k, numSubsteps, step.dt);
+        }
         OpmLog::info(fmt::format("Adjoint objective J = {:.16e}", value));
         return EXIT_SUCCESS;
     }
@@ -137,13 +142,18 @@ public:
             const auto& step = meta.substeps[k];
 
             // Objective contribution of this substep (solution(0) = x_k).
-            objectiveValue += objective_.stepValue(simulator_, k, numSubsteps);
+            objectiveValue +=
+                objective_.stepValue(simulator_, k, numSubsteps, step.dt);
 
-            // Right-hand side: -(dJ_k/dx_k)^T - Bdiag_{k+1}^T lambda_{k+1}.
+            // Right-hand side:
+            //   -(dJ_k/dx_r)^T + B^T D^-T (dJ_k/dx_w) - Bdiag_{k+1}^T lambda_{k+1}
+            // (from stationarity of the Lagrangian in x_w and x_r; the well
+            // equations are eliminated through the Schur complement).
             Vector rhs(numCells);
             rhs = 0.0;
             objective_.addStepGradient(simulator_, k, numSubsteps, rhs);
             rhs *= -1.0;
+            addWellObjectiveRhs_(step.dt, rhs);
             if (k < numSubsteps - 1) {
                 for (std::size_t i = 0; i < numCells; ++i) {
                     // rhs_i -= Bdiag_{k+1,i}^T lambda_{k+1,i}
@@ -175,6 +185,63 @@ public:
     }
 
 private:
+    //! \brief Add the well-objective coupling B^T D^-T (dJ_k/dx_w) to the
+    //!        adjoint right-hand side (StandardWells only).
+    void addWellObjectiveRhs_(double dt, Vector& rhs)
+    {
+        if (objective_.kind() != AdjointObjectiveFunction<TypeTag>::Kind::WellBhp) {
+            return;
+        }
+        const auto& wellModel = simulator_.problem().wellModel();
+        for (const auto& wellPtr : wellModel.localNonshutWells()) {
+            const Scalar weight = objective_.bhpGradient(wellPtr->name(), dt);
+            if (weight == 0.0) {
+                continue;
+            }
+            const auto* stdWell =
+                dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
+            if (!stdWell) {
+                OPM_THROW(std::runtime_error,
+                          "Adjoint well objectives support StandardWells only");
+            }
+            const auto& eqns = stdWell->linSys();
+            const auto& Dmat = eqns.Dmatrix()[0][0];
+            const std::size_t numWellEq = Dmat.N();
+
+            // dJ/dx_w: BHP is the last well primary variable.
+            Dune::DynamicVector<Scalar> dJdxw(numWellEq, 0.0);
+            dJdxw[numWellEq - 1] = weight;
+
+            // y = D^-T dJdxw  (small dense transposed solve).
+            Dune::DynamicMatrix<Scalar> Dt(numWellEq, numWellEq);
+            for (std::size_t i = 0; i < numWellEq; ++i) {
+                for (std::size_t j = 0; j < numWellEq; ++j) {
+                    Dt[i][j] = Dmat[j][i];
+                }
+            }
+            Dune::DynamicVector<Scalar> y(numWellEq, 0.0);
+            Dt.solve(y, dJdxw);
+
+            // rhs_cell += B[0][cell]^T y for all perforated cells.
+            const auto& Bmat = eqns.Bmatrix();
+            const auto& cells = stdWell->cells();
+            for (auto colIt = Bmat[0].begin(); colIt != Bmat[0].end(); ++colIt) {
+                const std::size_t perfIdx = colIt.index();
+                // The column index of B is the perforation-local index in
+                // the well's cell numbering.
+                const int cellIdx = cells[perfIdx];
+                const auto& block = *colIt; // numWellEq x numEq
+                for (int eq = 0; eq < numEq; ++eq) {
+                    Scalar sum = 0.0;
+                    for (std::size_t we = 0; we < numWellEq; ++we) {
+                        sum += block[we][eq] * y[we];
+                    }
+                    rhs[cellIdx][eq] += sum;
+                }
+            }
+        }
+    }
+
     void accumulateGradients_(double dt, const Vector& lambda)
     {
         auto& model = simulator_.model();
@@ -275,7 +342,7 @@ private:
 
     Simulator& simulator_;
     Replay replay_;
-    PressureAverageObjective<TypeTag> objective_;
+    AdjointObjectiveFunction<TypeTag> objective_;
     AdjointLinearSolver<Matrix, Vector> linearSolver_;
 
     std::vector<Scalar> gradientPv_;
