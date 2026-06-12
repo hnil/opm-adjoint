@@ -145,6 +145,24 @@ summaries outside the active output dir.
   `<CASE>.ADJOINT_LAMBDA_WELLS.txt` — the basis for later well-control
   gradients dJ/du.
 
+### Well-control gradients dJ/du — FD-verified
+
+The active control equation is the last well-equation row
+(R = rate|bhp − target ⇒ dR/d(target) = −1), so
+dJ/du = −Σ_k λ_w,k[last] over the substeps where the control is active —
+written to `<CASE>.ADJOINT_GRADIENTS_WELLCTRL.txt`.
+`tests/run-adjoint-fd-ctrl-test.sh` (ORAT producer, BHP objective):
+FD vs adjoint **rel err 1.4e-6** — this also end-to-end-validates λ_w,
+and it is the original 2019 goal (rate-optimization gradients).
+
+### Jutul status
+
+Setup struggled on Julia 1.12 (slow stack precompilation). Full setup
+instructions in `jutul/README.md` (recommend `juliaup add lts`, then the
+one-time env setup, then stage-1 forward comparison BEFORE any gradient
+comparison; stage-2 helpers in `jutul/OPMAdjointJutul.jl` use a
+matchref-identical misfit objective).
+
 **This completes the plan's priority objective on simple blackoil
 decks** (current scoping: no hysteresis / DRSDT / complex explicit
 updates). Still open: producers-only restriction (injector keywords),
