@@ -155,6 +155,18 @@ written to `<CASE>.ADJOINT_GRADIENTS_WELLCTRL.txt`.
 FD vs adjoint **rel err 1.4e-6** — this also end-to-end-validates λ_w,
 and it is the original 2019 goal (rate-optimization gradients).
 
+### Permeability gradients (Milestone C complete) — FD-verified
+
+dJ/dPERMX/Y/Z post-processed from the trans-multiplier gradients via the
+half-trans chain rule (`dJ/dK_in = Σ g_tmult (h_out/(h_in+h_out))/K_in`),
+with the one-sided half transmissibilities stored by the new
+`Transmissibility::setStoreHalfTrans` on adjoint-hooks (3rd hook commit,
+mirrors thermalHalfTrans, off by default). Output
+`<CASE>.ADJOINT_GRADIENTS_PERM.txt`;
+`tests/run-adjoint-fd-perm-test.sh` (per-cell PERMX in mD):
+**rel err 2.4e-8 / 1.7e-7 / 5.9e-8**. Gradient regression set extended
+to the PERM files.
+
 ### Jutul status
 
 Setup struggled on Julia 1.12 (slow stack precompilation). Full setup
