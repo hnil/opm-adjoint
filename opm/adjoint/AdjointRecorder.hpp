@@ -37,6 +37,7 @@
 
 #include <opm/adjoint/AdjointMeta.hpp>
 #include <opm/adjoint/AdjointParameters.hpp>
+#include <opm/adjoint/AdjointWellModel.hpp>
 #include <opm/adjoint/AdjointStorage.hpp>
 #include <opm/adjoint/AdjointSystemIO.hpp>
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
@@ -81,7 +82,7 @@ public:
     {
         // Sync the internal WGState copies so the snapshot can later be
         // read against a prepareDeserialize()'d well model in replay.
-        simulator_.problem().wellModel().normalizeWGStateForSerialization();
+        normalizeWGStateForSerialization(simulator_.problem().wellModel());
         archive_->write(simulator_, AdjointGroups::initial(), "simulator");
     }
 

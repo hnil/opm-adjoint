@@ -18,42 +18,59 @@
 */
 /*!
  * \file
- * \brief Well model used by the adjoint module.
+ * \brief WGState normalization for the adjoint recorder, against an
+ *        unmodified opm-simulators well model.
  *
- * Thin extension of BlackoilWellModel that exposes the WGState
- * synchronization needed to make pre-step snapshots deserializable
- * (commitWGState is public upstream, updateNupcolWGState protected).
- * Keeping this in a derived class means the module builds against
- * unmodified opm-simulators master.
+ * The pre-step snapshot of report step 0 is only deserializable against a
+ * prepareDeserialize()'d well model if the internal WGState copies
+ * (last_valid, nupcol) are synchronized with the active one.
+ * commitWGState() is public upstream, but updateNupcolWGState() is
+ * protected; it is reached here through the standard member-pointer
+ * access pattern (forming the pointer through a derived class is allowed
+ * and it can then be invoked on any base object). Both copies would be
+ * assigned the same values during the first iteration of the step anyway.
+ *
+ * (A derived well model installed via the WellModel property would be the
+ * cleaner route, but NonlinearSystemBlackOilReservoir's constructor
+ * currently takes the concrete BlackoilWellModel<TypeTag>&, so a property
+ * override does not propagate.)
  */
 #ifndef OPM_ADJOINT_WELL_MODEL_HPP
 #define OPM_ADJOINT_WELL_MODEL_HPP
 
-#include <opm/simulators/wells/BlackoilWellModel.hpp>
+#include <opm/simulators/wells/BlackoilWellModelGeneric.hpp>
 
 namespace Opm {
 
-template<class TypeTag>
-class AdjointWellModel : public BlackoilWellModel<TypeTag>
+namespace detail {
+
+template<class Scalar, class IndexTraits>
+class WGStateNormalizer : public BlackoilWellModelGeneric<Scalar, IndexTraits>
 {
-    using ParentType = BlackoilWellModel<TypeTag>;
-
 public:
-    using ParentType::ParentType;
+    // Never instantiated; only used to form the protected member pointer.
+    WGStateNormalizer() = delete;
 
-    //! \brief Synchronize the internal WGState copies (last_valid, nupcol)
-    //!        with the active one so that a snapshot serialized before the
-    //!        first solve of a report step can later be deserialized
-    //!        against a prepareDeserialize()'d well model.
-    //!
-    //! Both copies would be assigned the same values during the first
-    //! iteration of the step anyway.
-    void normalizeWGStateForSerialization()
+    template<class WellModel>
+    static void normalize(WellModel& wellModel)
     {
-        this->commitWGState();
-        this->updateNupcolWGState();
+        wellModel.commitWGState();
+        constexpr auto updateNupcol = &WGStateNormalizer::updateNupcolWGState;
+        (wellModel.*updateNupcol)();
     }
 };
+
+} // namespace detail
+
+//! \brief Synchronize the internal WGState copies (last_valid, nupcol)
+//!        with the active one so a pre-step snapshot can later be
+//!        deserialized against a prepareDeserialize()'d well model.
+template<class WellModel>
+void normalizeWGStateForSerialization(WellModel& wellModel)
+{
+    detail::WGStateNormalizer<typename WellModel::Scalar,
+                              typename WellModel::IndexTraits>::normalize(wellModel);
+}
 
 } // namespace Opm
 

@@ -40,6 +40,7 @@
 #include <opm/grid/CpGrid.hpp>
 #include <opm/simulators/flow/FlowMain.hpp>
 #include <opm/simulators/flow/Main.hpp>
+#include <opm/simulators/flow/TTagFlowProblemTPFA.hpp>
 
 #include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
 #include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
@@ -47,7 +48,6 @@
 
 #include <opm/adjoint/AdjointFlowProblem.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
-#include <opm/adjoint/AdjointWellModel.hpp>
 
 #include <cstring>
 #include <memory>
@@ -79,15 +79,11 @@ template<class TypeTag>
 struct AvoidElementContext<TypeTag, TTag::FlowAdjointProblem>
 { static constexpr bool value = true; };
 
-// Adjoint extensions, hooked in via the property system (no
+// Adjoint extension, hooked in via the property system (no
 // opm-simulators changes).
 template<class TypeTag>
 struct Problem<TypeTag, TTag::FlowAdjointProblem>
 { using type = AdjointFlowProblem<TypeTag>; };
-
-template<class TypeTag>
-struct WellModel<TypeTag, TTag::FlowAdjointProblem>
-{ using type = AdjointWellModel<TypeTag>; };
 
 } // namespace Opm::Properties
 

@@ -55,6 +55,17 @@ target_link_libraries(opmadjoint
     opmsimulators
 )
 
+# Match the compile environment of the opm-simulators build: HYPRE's
+# imported target carries HAVE_HYPRE=1 on its interface, which
+# opm-simulators links privately; mismatching definitions between the
+# library and our header-instantiated code must be avoided.
+if(USE_HYPRE AND USE_MPI)
+  find_package(HYPRE)
+  if(HYPRE_FOUND)
+    target_link_libraries(opmadjoint PUBLIC HYPRE::HYPRE)
+  endif()
+endif()
+
 # moduleVersion.cpp provides the version strings the flow banner needs;
 # compiled here against this module's generated project-version.h
 # (same pattern as opm-flowgeomechanics).
@@ -74,3 +85,8 @@ target_link_libraries(flow_adjoint
   PRIVATE
     moduleVersionAdjoint
 )
+# Match the opm build conventions (notably -UNDEBUG in Release when
+# WITH_NDEBUG=OFF; an NDEBUG mismatch against the opm-simulators library
+# is an ABI break in classes with assertion-only members).
+include(UseOptimization)
+use_additional_optimization(TARGET flow_adjoint)
