@@ -149,7 +149,10 @@ summaries outside the active output dir.
 decks** (current scoping: no hysteresis / DRSDT / complex explicit
 updates). Still open: producers-only restriction (injector keywords),
 per-term weights from config, dJ/du via lambda_w, T6 JutulDarcy
-cross-check (julia installed; package precompile pending), perm chain
+cross-check (stage 1 = FORWARD equivalence first — see
+`tests/run-jutul-forward-compare.sh`; helper library + dedicated Julia
+environment in `jutul/`, see `jutul/README.md`; package precompile
+pending), perm chain
 rule (needs half-trans exposure from Transmissibility — small
 adjoint-hooks addition, computeHalfTrans_ is private today), parts of
 [#6751](https://github.com/OPM/opm-simulators/pull/6751) /
