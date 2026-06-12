@@ -35,14 +35,10 @@ for kw in WOPR WGPR WBHP; do
 done
 
 echo "=== JutulDarcy forward run"
-julia --project="${OUTDIR}/julia_env" -e "
-using Pkg
-try
-    using JutulDarcy
-catch
-    Pkg.add(\"JutulDarcy\")
-    using JutulDarcy
-end
+SCRIPTDIR=$(cd "$(dirname "$0")" && pwd)
+JUTULENV=${SCRIPTDIR}/../jutul
+julia --project="${JUTULENV}" -e "
+using JutulDarcy
 using Jutul
 
 case = setup_case_from_data_file(raw\"${DECK}\")
