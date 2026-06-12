@@ -527,16 +527,42 @@ FlexibleCellEvaluator plan — **most of it already exists**:
   of a face, evaluate storage+flux, compare values AND state derivatives
   against the production linearization from the replay archive.
 - **Parameter passes, revised:**
-  - pvmult / tmult / perm:已 done analytically and FD-verified — the
+  - pvmult / tmult / perm: done analytically and FD-verified — the
     evaluator is NOT needed for them.
-  - **End-point scaling (the remaining parameter class): cell-local
-    parameter FD** is the right v1 (as sketched in the original plan):
-    perturb the cell's scaled saturation end points in the
-    materialLawManager, recompute IQ(cell) + storage + the cell's face
-    fluxes through the public kernels, difference → dR/dθ columns,
-    contract with λ. Cost: O(2 × params/cell) cell-local evaluations per
-    substep — no global solves. Needs one more adjoint-hooks accessor
-    (mutate per-cell EclEpsScalingPoints in EclMaterialLawManager).
+  - **End-point scaling — IMPLEMENTED (AdjointEndpointGradients.hpp +
+    `--adjoint-endpoints`), via per-cell parameter FD of the FULL
+    residual.** Two design points discovered during implementation:
+    1. *General input→derivative registry*: a table mapping deck
+       end-point keywords (SWL SGL SWCR SGCR SOWCR SOGCR SWU SGU KRW
+       KRG KRORW KRORG PCW PCG) to member pointers into
+       `EclEpsScalingPointsInfo`; the perturbation/re-derivation/
+       contraction machinery is shared, so supporting another scaled
+       quantity is one table line. Perturbation is pure public API —
+       copy the cell's `oilWaterScaledEpsInfoDrainage`, modify the
+       registered field, re-init the scaled points of the oil-water and
+       gas-oil drainage curves AND re-set the 3-phase params' own
+       connate-water copy (`setSwl` — used in the kro saturation
+       blending; missing it gives O(1) gradient errors). No
+       adjoint-hooks accessor was needed after all.
+    2. *Full re-linearization, not cell-local storage+flux*: unlike PV
+       and trans, the end points change relperm/Pc, which enter the
+       perforation rates (well sources reach the reservoir residual
+       through `problem.source`) and the well equations. The perturbed
+       residual is therefore obtained by re-running the converged-point
+       linearization (the replay's final-linearization sequence), and
+       the contraction includes the well rows:
+       dJ/dθ_i += λ_r·ΔR_r + Σ_w λ_w·ΔR_w (λ_w stashed by
+       computeWellAdjoints_). Cost: 2 global assemblies per cell per
+       parameter per substep — "write too much first"; the cell-local
+       fast path (storage+flux only, plus well-term FD restricted to
+       perforated cells) is the later optimization.
+    FD-verified on MODEL_1D_DEBUG (ENDSCALE variant, explicit init so
+    the initial state is end-point independent): SWL and KRW vs
+    pressure-average at 1e-8…1e-5 rel, SWL vs rate:Prod:oil (BHP
+    producer, exercises the well terms) at 5e-8 rel
+    (tests/run-adjoint-fd-endpoint-test.sh, ctest
+    adjoint_fd_endpoint_swl). Control-mode duality applies as usual: an
+    ORAT-pinned rate objective correctly gives a zero gradient.
   - **Exact parameter-AD** for end points would require the material-law
     *parameter* objects to be templated on the evaluation type (they are
     Scalar-based EclEpsScalingPoints today) — an upstream-sized change;

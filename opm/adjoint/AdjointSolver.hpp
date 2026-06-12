@@ -45,6 +45,7 @@
 
 #include <opm/models/utils/propertysystem.hh>
 
+#include <opm/adjoint/AdjointEndpointGradients.hpp>
 #include <opm/adjoint/AdjointLinearSolver.hpp>
 #include <opm/adjoint/AdjointObjective.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
@@ -81,6 +82,7 @@ public:
 
     static constexpr int numEq = getPropValue<TypeTag, Properties::NumEq>();
 
+    using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
     using Replay = AdjointReplay<TypeTag>;
     using BdiagBlock = typename Replay::BdiagBlock;
     using Matrix = std::remove_cvref_t<
@@ -93,6 +95,21 @@ public:
         , objective_(AdjointConfig::fromParameters().objective)
     {
         replay_.setComputeBdiag(true);
+        const std::string endpointSpec = AdjointConfig::fromParameters().endpoints;
+        std::size_t pos = 0;
+        while (pos != std::string::npos && pos < endpointSpec.size()) {
+            const auto comma = endpointSpec.find(',', pos);
+            const std::string name = endpointSpec.substr(
+                pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            if (!name.empty()) {
+                endpointDefs_.push_back(&findEndpointParam<Scalar>(name));
+            }
+            pos = (comma == std::string::npos) ? std::string::npos : comma + 1;
+        }
+        if (!endpointDefs_.empty()) {
+            OpmLog::info("Adjoint end-point gradients enabled for " +
+                         endpointSpec);
+        }
     }
 
     //! \brief Evaluate the objective on the recorded final state only.
@@ -177,6 +194,7 @@ public:
 
             computeWellAdjoints_(k, step.dt, lambda);
             accumulateGradients_(step.dt, lambda);
+            accumulateEndpointGradients_(step.dt, lambda);
 
             bdiagPrev = replay_.bdiag();
             lambdaPrev = lambda;
@@ -280,6 +298,7 @@ private:
     //!        lambda-well log (basis for later well-control gradients).
     void computeWellAdjoints_(int k, double dt, const Vector& lambda)
     {
+        lambdaWells_.clear();
         const auto& wellModel = simulator_.problem().wellModel();
         for (const auto& wellPtr : wellModel.localNonshutWells()) {
             const auto* stdWell =
@@ -315,6 +334,7 @@ private:
             Dune::DynamicVector<Scalar> lambdaW(numWellEq, 0.0);
             Dt.solve(lambdaW, work);
             lambdaW *= -1.0;
+            lambdaWells_[stdWell->name()] = lambdaW;
 
             std::string line = std::to_string(k) + " " + stdWell->name();
             for (std::size_t j = 0; j < numWellEq; ++j) {
@@ -401,6 +421,89 @@ private:
         }
     }
 
+    //! \brief End-point scaling gradients by per-cell parameter
+    //!        differences of the FULL residual (see
+    //!        AdjointEndpointGradients.hpp for the perturbation mechanism).
+    //!
+    //! Unlike pore volume and transmissibility, the end points change the
+    //! relative permeabilities and capillary pressure, which enter the
+    //! perforation rates and the well equations as well as storage and
+    //! flux. The perturbed residual is therefore obtained by re-running
+    //! the converged-point linearization (well sources flow through
+    //! problem.source), and the contraction includes the well rows:
+    //!   dJ/dtheta_i += lambda_r . dR_r/dtheta_i + sum_w lambda_w . dR_w/dtheta_i
+    void accumulateEndpointGradients_(double dt, const Vector& lambda)
+    {
+        if (endpointDefs_.empty()) {
+            return;
+        }
+        auto& model = simulator_.model();
+        auto& problem = simulator_.problem();
+        const std::size_t numCells = model.numGridDof();
+        EndpointPerturber<TypeTag> perturber(problem);
+
+        if (gradientEndpoints_.empty()) {
+            gradientEndpoints_.assign(endpointDefs_.size(),
+                                      std::vector<Scalar>(numCells, 0.0));
+        }
+
+        auto relinearizedContraction = [&]() -> Scalar {
+            // both time levels: Pc/kr changes affect the new-time fluxes
+            // and sources AND the old-time storage (phase pressure -> invB)
+            model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+            model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/1);
+            problem.beginIteration();
+            model.linearizer().linearizeDomain();
+            problem.endIteration();
+
+            Scalar value = 0.0;
+            const auto& res = model.linearizer().residual();
+            for (std::size_t i = 0; i < numCells; ++i) {
+                for (int eq = 0; eq < numEq; ++eq) {
+                    value += lambda[i][eq] * res[i][eq];
+                }
+            }
+            for (const auto& wellPtr : problem.wellModel().localNonshutWells()) {
+                const auto* stdWell =
+                    dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
+                if (!stdWell) {
+                    continue;
+                }
+                const auto lwIt = lambdaWells_.find(stdWell->name());
+                if (lwIt == lambdaWells_.end()) {
+                    continue;
+                }
+                const auto& resWell = stdWell->linSys().residual();
+                const auto& lw = lwIt->second;
+                for (std::size_t j = 0; j < lw.size(); ++j) {
+                    value += lw[j] * resWell[0][j];
+                }
+            }
+            return value;
+        };
+
+        const Scalar h = 1e-7;
+        for (std::size_t p = 0; p < endpointDefs_.size(); ++p) {
+            const auto& def = *endpointDefs_[p];
+            for (unsigned i = 0; i < numCells; ++i) {
+                perturber.apply(i, def, h);
+                const Scalar plus = relinearizedContraction();
+                perturber.apply(i, def, -h);
+                const Scalar minus = relinearizedContraction();
+                perturber.restore(i, def);
+
+                gradientEndpoints_[p][i] += (plus - minus) / (2.0 * h);
+            }
+        }
+
+        // leave the model in the unperturbed converged-linearization state
+        model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+        model.invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/1);
+        problem.beginIteration();
+        model.linearizer().linearizeDomain();
+        problem.endIteration();
+    }
+
     void writeResults_(Scalar objectiveValue)
     {
         const auto& ioConfig = simulator_.vanguard().eclState().getIOConfig();
@@ -427,6 +530,16 @@ private:
             }
         }
         writePermGradients_(base);
+        for (std::size_t p = 0; p < endpointDefs_.size(); ++p) {
+            std::ofstream os(base + ".ADJOINT_GRADIENTS_ENDPOINT_" +
+                             endpointDefs_[p]->name + ".txt");
+            os.precision(16);
+            os << "# dJ/d(" << endpointDefs_[p]->name
+               << "_i), one line per cell\n";
+            for (const auto& value : gradientEndpoints_[p]) {
+                os << value << "\n";
+            }
+        }
         {
             std::ofstream os(base + ".ADJOINT_GRADIENTS_WELLCTRL.txt");
             os.precision(16);
@@ -445,8 +558,12 @@ private:
                 os << line << "\n";
             }
         }
+        std::string kinds = "PV,TRANS,PERM,WELLCTRL";
+        for (const auto* def : endpointDefs_) {
+            kinds += ",ENDPOINT_" + def->name;
+        }
         OpmLog::info("Adjoint gradients written to " + base +
-                     ".ADJOINT_GRADIENTS_{PV,TRANS}.txt");
+                     ".ADJOINT_GRADIENTS_{" + kinds + "}.txt");
     }
 
     //! \brief Permeability chain rule, post-processed from the
@@ -512,6 +629,9 @@ private:
     std::vector<Scalar> gradientTrans_;
     std::vector<std::string> wellAdjointLog_;
     std::map<std::string, Scalar> controlGradient_;
+    std::map<std::string, Dune::DynamicVector<Scalar>> lambdaWells_;
+    std::vector<const EndpointParamDef<Scalar>*> endpointDefs_;
+    std::vector<std::vector<Scalar>> gradientEndpoints_;
 };
 
 } // namespace Opm

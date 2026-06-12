@@ -167,6 +167,39 @@ mirrors thermalHalfTrans, off by default). Output
 **rel err 2.4e-8 / 1.7e-7 / 5.9e-8**. Gradient regression set extended
 to the PERM files.
 
+### End-point scaling gradients — FD-verified
+
+`--adjoint-endpoints=SWL,KRW,...` (any of SWL SGL SWCR SGCR SOWCR SOGCR
+SWU SGU KRW KRG KRORW KRORG PCW PCG — a registry in
+`AdjointEndpointGradients.hpp` maps deck keywords to
+`EclEpsScalingPointsInfo` fields; one table line per keyword). Per cell
+the registered field is perturbed, the oil-water and gas-oil drainage
+scaled points re-derived through the public
+`scaledPoints().init(info, config, system)` API (plus the 3-phase
+params' own `setSwl` connate copy used in the kro blending), and the
+FULL residual re-linearized — the end points reach the well equations
+and perforation sources through relperm, so unlike PV/trans the
+contraction includes the well rows (λ_w · ΔR_w). Output
+`<CASE>.ADJOINT_GRADIENTS_ENDPOINT_<KW>.txt`.
+
+```bash
+tests/run-adjoint-fd-endpoint-test.sh <flow_adjoint> \
+    <opm-tests>/adjoint_tests/MODEL_1D_DEBUG/inputfiles /tmp/ep \
+    [KW] [base] [delta] [rel-tol] [objective] [orat]
+```
+
+The script derives an ENDSCALE variant of the deck (keyword include
+initialized to the table value, so the baseline equals the stock deck;
+`--check-satfunc-consistency=false` because a perturbed SWL formally
+violates SWL <= SWCR). MODEL_1D_DEBUG initializes with explicit
+PRESSURE/SWAT/SGAS, so the initial state is end-point independent and
+the FD comparison is exact. Results: SWL **7.9e-8 / 4.8e-8 / 6.7e-6**,
+KRW (base 0.5 = table max) **1.5e-8 / 3.0e-8 / 1.4e-5**, SWL vs
+`rate:Prod:oil` (BHP producer; perforated cells exercise the well
+terms) **1.3e-8 / 1.4e-8 / 4.8e-8**. ctest: `adjoint_fd_endpoint_swl`.
+Note the usual control-mode duality: with the producer rewritten to
+ORAT, a rate objective is pinned and dJ/dθ = 0 on both sides.
+
 ### Jutul status
 
 Setup struggled on Julia 1.12 (slow stack precompilation). Full setup

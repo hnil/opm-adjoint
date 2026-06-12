@@ -49,6 +49,10 @@ struct AdjointMode { static constexpr auto value = ""; };
 //!        selects the HDF5 backend, anything else a plain directory store.
 struct AdjointFile { static constexpr auto value = ""; };
 
+//! \brief Comma-separated list of end-point scaling parameters to
+//!        compute gradients for (e.g. "SWL,KRW"); empty disables.
+struct AdjointEndpoints { static constexpr auto value = ""; };
+
 //! \brief Objective function for adjoint/gradient runs:
 //!        "pressure-average" or "bhp:<WELL>".
 struct AdjointObjective { static constexpr auto value = "pressure-average"; };
@@ -77,6 +81,7 @@ struct AdjointConfig
     double replayTolerance{1e-12};
     double replayAbsTolerance{1e-9};
     std::string objective{};  //!< objective specification
+    std::string endpoints{};  //!< end-point parameter list
 
     static AdjointConfig fromParameters();
 };

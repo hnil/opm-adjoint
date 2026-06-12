@@ -34,6 +34,7 @@ AdjointConfig AdjointConfig::fromParameters()
     config.replayTolerance = Parameters::Get<Parameters::AdjointReplayTolerance>();
     config.replayAbsTolerance = Parameters::Get<Parameters::AdjointReplayAbsTolerance>();
     config.objective = Parameters::Get<Parameters::AdjointObjective>();
+    config.endpoints = Parameters::Get<Parameters::AdjointEndpoints>();
     return config;
 }
 
@@ -55,6 +56,9 @@ void registerAdjointParameters()
     Parameters::Register<Parameters::AdjointReplayTolerance>
         ("Relative tolerance for comparing re-linearized systems against "
          "stored ones in adjoint replay");
+    Parameters::Register<Parameters::AdjointEndpoints>
+        ("Comma-separated saturation end-point parameters for adjoint "
+         "gradients (SWL, SWCR, KRW, ...); empty disables");
     Parameters::Register<Parameters::AdjointObjective>
         ("Objective function for adjoint gradient runs: 'pressure-average' "
          "or 'bhp:<WELL>' (time-integrated bottom-hole pressure)");

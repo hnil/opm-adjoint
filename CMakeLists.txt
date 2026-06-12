@@ -119,6 +119,10 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-ctrl-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
               ${_testout}/fd_ctrl)
+    add_test(NAME adjoint_fd_endpoint_swl
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-endpoint-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d}
+              ${_testout}/fd_endpoint_swl)
   endif()
   if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA)
     add_test(NAME adjoint_replay_spe1
