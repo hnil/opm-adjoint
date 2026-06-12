@@ -635,6 +635,63 @@ formats, no schema), MatrixMarket sidecars (kept only as optional debug via exis
 `TpfaLinearizer::exportSystem`), bespoke binary. Results (λ, gradients, J) written into the same
 file; observed well curves read via ESmry — no new input format.
 
+### Code review: highly favorable refactorings (2026-06-12)
+
+Observations from a review pass after the end-point work landed
+(module at d813709; AdjointSolver.hpp has grown to ~640 lines).
+Prioritized; none is blocking, R1/R2 are the ones worth doing *before*
+the next feature touches the same code.
+
+- **R1 — generalize the end-point registry into a uniform parameter-
+  gradient interface (HIGH).** AdjointSolver currently carries four
+  ad-hoc gradient stores with hand-written accumulation and output each
+  (`gradientPv_`, `gradientTrans_` (+ perm post-processing),
+  `gradientEndpoints_`, `controlGradient_`). The end-point registry
+  already demonstrates the right shape: *name → how to perturb/
+  accumulate → one shared writer*. Promote it to a small
+  `ParameterGradient` interface (name, kind cell/face/well,
+  `accumulate(dt, lambda)`, `write(base)`), with the analytic PV/trans
+  accumulators, the perm chain rule, the control-target gradient and
+  the end-point FD as implementations selected from one runtime list.
+  This is the full version of the "general method for mapping input to
+  what to get derivatives for": adding MULT*-region multipliers, fault
+  multipliers or SWATINIT-style parameters becomes one entry, the
+  sweep loop and writeResults_ stop growing per parameter class, and
+  `--adjoint-endpoints`/future parameter flags collapse into one
+  `--adjoint-parameters=` list.
+- **R2 — single owner for the converged-point linearization sequence
+  (HIGH).** The `beginIteration → linearizeDomain → endIteration`
+  triplet now exists in four places (twice in
+  `AdjointReplay::replayStep`, twice in
+  `AdjointSolver::accumulateEndpointGradients_` including the cleanup
+  pass). It encodes the forward assembly contract; if upstream changes
+  that sequence (e.g. NLDD, new aux modules) we want exactly one place
+  to fix. Move it to a public `AdjointReplay::linearizeConvergedPoint()`
+  and call it from both classes.
+- **R3 — factor the small dense transposed well solve (MEDIUM).**
+  `addWellObjectiveRhs_` and `computeWellAdjoints_` both hand-build the
+  transposed D and call `Dt.solve`. Extract
+  `solveWellTransposed(eqns, rhs) -> DynamicVector` (and the
+  B^T/C-block contraction loops are near-identical too). Removes ~40
+  duplicated lines and pins the well-row conventions in one spot.
+- **R4 — split AdjointSolver (MEDIUM, do with the next feature).**
+  Three responsibilities in one class: backward-sweep orchestration,
+  well coupling (rhs terms + lambda_w), gradient accumulation/output.
+  Natural cut: `AdjointWellCoupling` + result writing into the R1
+  interface; the solver keeps only the recursion. ~640 lines today and
+  every milestone has added to it; cheaper to cut now than after the
+  optimization-loop work starts.
+- **R5 — shared shell library for the FD test scripts (LOW-MEDIUM).**
+  Seven scripts duplicate STRICT flags, `run_J`, the ORAT rewrite and
+  the compare loop. One sourced `tests/adjoint-fd-lib.sh` prevents
+  tolerance/flag drift between tests (the satfunc-consistency flag is
+  deliberately endpoint-only — keep per-script extras as a variable).
+- **R6 — trivia.** `AdjointConfig::fromParameters()` parsed twice in
+  the AdjointSolver ctor (store once); end-point FD step `h = 1e-7`
+  hard-coded (promote to `--adjoint-endpoint-fd-h` when tuning is ever
+  needed); `wellAdjointLog_` stores formatted strings (keep structured
+  rows, format at write time).
+
 ### PR sequencing
 
 0. **PR0 (prerequisites, already open)**: land [#7039](https://github.com/OPM/opm-simulators/pull/7039)
