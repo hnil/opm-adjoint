@@ -115,13 +115,33 @@ the identical storage expression. The spe02 radial decks and model6
 (2-phase) cannot run in the 3-phase blackoil TypeTag binaries
 (pre-existing limitation).
 
-Still open in Milestone B: observed curves from a reference summary via
-ESmry (pure I/O now), lambda_w output for later dJ/du, cross-validation
-vs JutulDarcy (T6 — julia is installed via juliaup, JutulDarcy package
-setup pending), parts of
-[#6751](https://github.com/OPM/opm-simulators/pull/6751) (full-system
-path) and [#7039](https://github.com/OPM/opm-simulators/pull/7039)
-(exact forward replay) onto the adjoint-hooks branch when needed.
+### Well-curve matching vs a reference summary (matchref) — DONE
+
+`--adjoint-objective=matchref:<WELL>:<phase>:<refcase>`:
+J = Σ dt (q(t_k) − q_obs(t_k))², observations read via `ESmry` with
+linear time interpolation and unit conversion from the file metadata
+(SM3/DAY, MSCF/DAY, STB/DAY — SPE1 is FIELD; the twin test caught the
+missing conversion immediately). Verified on SPE1CASE1
+(`tests/run-adjoint-matchref-test.sh`, reference PORO 0.285 vs base 0.3,
+gas rate of the ORAT-controlled producer):
+- twin check (run vs its own summary): J = 1.2e-4 vs misfit J = 5.9e8
+  (12 orders; residual = summary float precision);
+- FD of the global porosity scale vs Σ adjoint pvmult gradients:
+  rel err 1.5e-4.
+
+Caveat encoded in the script: replay/gradient/objective runs truncate
+the summary files of their output directory at startup — keep reference
+summaries outside the active output dir.
+
+**This completes the plan's priority objective on simple blackoil
+decks** (current scoping: no hysteresis / DRSDT / complex explicit
+updates). Still open: producers-only restriction (injector keywords),
+multi-well/multi-phase weighted sums (mechanical extension), lambda_w
+output for later dJ/du, T6 JutulDarcy cross-check (julia installed via
+juliaup; package setup pending), parts of
+[#6751](https://github.com/OPM/opm-simulators/pull/6751) /
+[#7039](https://github.com/OPM/opm-simulators/pull/7039) onto
+adjoint-hooks when needed.
 
 ```bash
 BIN_MOD=~/Documents/OPM/opm_clean/builds/release/opm-adjoint
