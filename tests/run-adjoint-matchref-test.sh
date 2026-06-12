@@ -22,6 +22,7 @@ OUTDIR=${3:?missing output dir}
 DELTA=${4:-2e-5}
 RELTOL=${5:-1e-3}
 REFPORO=${6:-0.285}
+OBJTEMPLATE=${7:-matchref:PROD:gas:%REF%}
 
 STRICT="--threads-per-process=1 --enable-storage-cache=false \
  --enable-adaptive-time-stepping=false \
@@ -49,7 +50,7 @@ make_deck "${REFPORO}" "${OUTDIR}/deck_ref"
 run_forward "${OUTDIR}/deck_ref" "${OUTDIR}/ref" || { echo "reference run failed"; exit 1; }
 REFCASE=${OUTDIR}/ref/SPE1CASE1
 [ -f "${REFCASE}.UNSMRY" ] || { echo "no reference UNSMRY"; exit 1; }
-OBJ="matchref:PROD:gas:${REFCASE}"
+OBJ=${OBJTEMPLATE//%REF%/${REFCASE}}
 
 echo "=== base run (PORO 0.3) + adjoint gradient, objective ${OBJ}"
 make_deck 0.3 "${OUTDIR}/deck_base"
@@ -69,7 +70,7 @@ echo "misfit J = ${J0}, sum of pvmult gradients = ${GRADSUM}"
 echo "=== twin check (base matched against its own summary)"
 ${FLOW} "${OUTDIR}/deck_base/SPE1CASE1.DATA" --output-dir="${OUTDIR}/base" ${STRICT} \
     --adjoint-mode=objective \
-    --adjoint-objective="matchref:PROD:gas:${OUTDIR}/twinref/SPE1CASE1" \
+    --adjoint-objective="${OBJTEMPLATE//%REF%/${OUTDIR}/twinref/SPE1CASE1}" \
     > "${OUTDIR}/base/twin.log" 2>&1 || { echo "twin run failed"; exit 1; }
 JTWIN=$(get_J "${OUTDIR}/base/twin.log")
 TWINOK=$(python3 -c "print(1 if abs($JTWIN) < 1e-6 * abs($J0) else 0)")

@@ -72,6 +72,7 @@ public:
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
     using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
+    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using SparseMatrixAdapter = GetPropType<TypeTag, Properties::SparseMatrixAdapter>;
 
     static constexpr int numEq = getPropValue<TypeTag, Properties::NumEq>();
@@ -170,6 +171,7 @@ public:
             // Solve A_red^T lambda_k = rhs.
             linearSolver_.solveTransposed(jacobian.istlMatrix(), rhs, lambda);
 
+            computeWellAdjoints_(k, step.dt, lambda);
             accumulateGradients_(step.dt, lambda);
 
             bdiagPrev = replay_.bdiag();
@@ -185,20 +187,47 @@ public:
     }
 
 private:
+    //! \brief dJ_k/dx_w of the objective for one StandardWell
+    //!        (empty vector if the well is not involved).
+    Dune::DynamicVector<Scalar>
+    wellObjectiveGradient_(const StandardWell<TypeTag>& stdWell, double dt)
+    {
+        using Kind = typename AdjointObjectiveFunction<TypeTag>::Kind;
+        const auto& eqns = stdWell.linSys();
+        const std::size_t numWellEq = eqns.Dmatrix()[0][0].N();
+        Dune::DynamicVector<Scalar> dJdxw(numWellEq, 0.0);
+
+        if (objective_.kind() == Kind::WellBhp) {
+            // BHP is the last well primary variable.
+            dJdxw[numWellEq - 1] = objective_.bhpGradient(stdWell.name(), dt);
+        } else if (objective_.kind() == Kind::RateTerms) {
+            // q_c is a function of the well primary variables; its
+            // derivatives sit in the well slots of the EvalWell returned
+            // by getQs (reservoir derivatives first, well derivatives at
+            // numEq + j).
+            for (const auto& term : objective_.rateTerms()) {
+                if (term.well != stdWell.name()) {
+                    continue;
+                }
+                const auto qs = stdWell.primaryVariables().getQs(
+                    FluidSystem::canonicalToActiveCompIdx(term.canonicalCompIdx));
+                const Scalar weight =
+                    objective_.termWeight(simulator_, term, dt, qs.value());
+                for (std::size_t j = 0; j < numWellEq; ++j) {
+                    dJdxw[j] += weight * qs.derivative(numEq + j);
+                }
+            }
+        }
+        return dJdxw;
+    }
+
     //! \brief Add the well-objective coupling B^T D^-T (dJ_k/dx_w) to the
     //!        adjoint right-hand side (StandardWells only).
     void addWellObjectiveRhs_(double dt, Vector& rhs)
     {
-        using Kind = typename AdjointObjectiveFunction<TypeTag>::Kind;
-        if (objective_.kind() != Kind::WellBhp &&
-            objective_.kind() != Kind::WellRate &&
-            objective_.kind() != Kind::WellRateMatch &&
-            objective_.kind() != Kind::WellRateMatchRef) {
-            return;
-        }
         const auto& wellModel = simulator_.problem().wellModel();
         for (const auto& wellPtr : wellModel.localNonshutWells()) {
-            if (wellPtr->name() != objective_.wellName()) {
+            if (!objective_.involvesWell(wellPtr->name())) {
                 continue;
             }
             const auto* stdWell =
@@ -211,25 +240,7 @@ private:
             const auto& Dmat = eqns.Dmatrix()[0][0];
             const std::size_t numWellEq = Dmat.N();
 
-            // dJ/dx_w.
-            Dune::DynamicVector<Scalar> dJdxw(numWellEq, 0.0);
-            if (objective_.kind() == Kind::WellBhp) {
-                // BHP is the last well primary variable.
-                dJdxw[numWellEq - 1] = objective_.bhpGradient(wellPtr->name(), dt);
-            } else {
-                // Rate objective: q_c is a function of the well primary
-                // variables; its derivatives sit in the well slots of the
-                // EvalWell returned by getQs (reservoir derivatives first,
-                // well derivatives at numEq + j).
-                const auto qs =
-                    stdWell->primaryVariables().getQs(objective_.activeCompIdx());
-                const Scalar weight =
-                    objective_.rateWeight(simulator_, wellPtr->name(), dt,
-                                          qs.value());
-                for (std::size_t j = 0; j < numWellEq; ++j) {
-                    dJdxw[j] = weight * qs.derivative(numEq + j);
-                }
-            }
+            const auto dJdxw = wellObjectiveGradient_(*stdWell, dt);
 
             // y = D^-T dJdxw  (small dense transposed solve).
             Dune::DynamicMatrix<Scalar> Dt(numWellEq, numWellEq);
@@ -241,13 +252,11 @@ private:
             Dune::DynamicVector<Scalar> y(numWellEq, 0.0);
             Dt.solve(y, dJdxw);
 
-            // rhs_cell += B[0][cell]^T y for all perforated cells.
+            // rhs_cell += B[0][perf]^T y for all perforated cells.
             const auto& Bmat = eqns.Bmatrix();
             const auto& cells = stdWell->cells();
             for (auto colIt = Bmat[0].begin(); colIt != Bmat[0].end(); ++colIt) {
                 const std::size_t perfIdx = colIt.index();
-                // The column index of B is the perforation-local index in
-                // the well's cell numbering.
                 const int cellIdx = cells[perfIdx];
                 const auto& block = *colIt; // numWellEq x numEq
                 for (int eq = 0; eq < numEq; ++eq) {
@@ -258,6 +267,56 @@ private:
                     rhs[cellIdx][eq] += sum;
                 }
             }
+        }
+    }
+
+    //! \brief Well adjoints of substep k:
+    //!        lambda_w = -D^-T (dJ_k/dx_w + sum_perf C[0][perf] lambda_r[cell]),
+    //!        from stationarity of the Lagrangian in x_w. Appended to the
+    //!        lambda-well log (basis for later well-control gradients).
+    void computeWellAdjoints_(int k, double dt, const Vector& lambda)
+    {
+        const auto& wellModel = simulator_.problem().wellModel();
+        for (const auto& wellPtr : wellModel.localNonshutWells()) {
+            const auto* stdWell =
+                dynamic_cast<const StandardWell<TypeTag>*>(wellPtr.get());
+            if (!stdWell) {
+                continue;
+            }
+            const auto& eqns = stdWell->linSys();
+            const auto& Dmat = eqns.Dmatrix()[0][0];
+            const std::size_t numWellEq = Dmat.N();
+
+            auto work = wellObjectiveGradient_(*stdWell, dt);
+
+            const auto& Cmat = eqns.Cmatrix();
+            const auto& cells = stdWell->cells();
+            for (auto colIt = Cmat[0].begin(); colIt != Cmat[0].end(); ++colIt) {
+                const std::size_t perfIdx = colIt.index();
+                const int cellIdx = cells[perfIdx];
+                const auto& block = *colIt; // numWellEq x numEq
+                for (std::size_t we = 0; we < numWellEq; ++we) {
+                    for (int eq = 0; eq < numEq; ++eq) {
+                        work[we] += block[we][eq] * lambda[cellIdx][eq];
+                    }
+                }
+            }
+
+            Dune::DynamicMatrix<Scalar> Dt(numWellEq, numWellEq);
+            for (std::size_t i = 0; i < numWellEq; ++i) {
+                for (std::size_t j = 0; j < numWellEq; ++j) {
+                    Dt[i][j] = Dmat[j][i];
+                }
+            }
+            Dune::DynamicVector<Scalar> lambdaW(numWellEq, 0.0);
+            Dt.solve(lambdaW, work);
+            lambdaW *= -1.0;
+
+            std::string line = std::to_string(k) + " " + stdWell->name();
+            for (std::size_t j = 0; j < numWellEq; ++j) {
+                line += " " + std::to_string(lambdaW[j]);
+            }
+            wellAdjointLog_.push_back(std::move(line));
         }
     }
 
@@ -355,6 +414,14 @@ private:
                    << gradientTrans_[f] << "\n";
             }
         }
+        {
+            std::ofstream os(base + ".ADJOINT_LAMBDA_WELLS.txt");
+            os << "# substep well lambda_w (one line per well per substep, "
+                  "backward order)\n";
+            for (const auto& line : wellAdjointLog_) {
+                os << line << "\n";
+            }
+        }
         OpmLog::info("Adjoint gradients written to " + base +
                      ".ADJOINT_GRADIENTS_{PV,TRANS}.txt");
     }
@@ -367,6 +434,7 @@ private:
     std::vector<Scalar> gradientPv_;
     std::vector<std::pair<std::size_t, unsigned>> faces_;
     std::vector<Scalar> gradientTrans_;
+    std::vector<std::string> wellAdjointLog_;
 };
 
 } // namespace Opm

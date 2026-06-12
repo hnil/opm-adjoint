@@ -18,25 +18,27 @@
 */
 /*!
  * \file
- * \brief First objective functions for the adjoint solver.
+ * \brief Objective functions for the adjoint solver.
  *
  * Per-substep sum objectives J = sum_k J_k(x_k, xw_k) (the Jutul-style
  * interface), selected with --adjoint-objective:
  *
  *  - "pressure-average": J = (1/N) sum_i x_i[pressureIdx] at the final
- *    substep. Pure function of the final reservoir solution; no well
- *    coupling. Used to validate the reservoir part of the chain.
+ *    substep (reservoir-state validation objective).
+ *  - "bhp:<WELL>": J = sum_k dt_k BHP(x_k) (well primary variable;
+ *    exact dJ/dx_w, exercises the well coupling without approximation).
+ *  - Rate-family objectives, all represented as a sum of rate terms
+ *    (single- or multi-term):
+ *      "rate:<WELL>:<phase>"                J += dt q
+ *      "match:<WELL>:<phase>:<target>"      J += dt (q - q_t)^2
+ *      "matchref:<WELL>:<phase>:<refcase>"  J += dt (q - q_obs(t))^2
+ *      "matchsum:<refcase>:<W>.<p>[+<W>.<p>]..."
+ *                                           J += sum_terms dt (q - q_obs)^2
+ *    Observed curves are read from the reference run's summary via
+ *    ESmry, interpolated linearly in time and converted from the file's
+ *    rate unit to the internal SI/sign convention. Producers only (v1).
  *
- *  - "bhp:<WELL>": J = sum_k dt_k * BHP_<WELL>(x_k). The bottom-hole
- *    pressure is itself a well primary variable (last entry of the
- *    StandardWell primary variable block), so dJ_k/dx_w is exact and the
- *    full well-coupling machinery (B^T D^-T terms in the adjoint
- *    right-hand side) is exercised with no approximation. Every substep
- *    contributes, so the cross-term recursion is exercised as well.
- *
- * Well-curve matching against a reference summary (ESmry) follows; it
- * uses the same well-coupling path with dJ/dx_w obtained from the
- * rate <-> primary variable mapping.
+ * Phase is one of oil|water|gas.
  */
 #ifndef OPM_ADJOINT_OBJECTIVE_HPP
 #define OPM_ADJOINT_OBJECTIVE_HPP
@@ -65,10 +67,26 @@ public:
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
 
-    enum class Kind { PressureAverage, WellBhp, WellRate, WellRateMatch,
-                      WellRateMatchRef };
+    enum class Kind { PressureAverage, WellBhp, RateTerms };
 
-    //! \param spec objective specification string (--adjoint-objective).
+    enum class TermType { Rate, MatchConst, MatchRef };
+
+    //! One rate term of the objective.
+    struct RateTerm
+    {
+        std::string well;
+        unsigned canonicalPhaseIdx{0};
+        unsigned canonicalCompIdx{0};
+        TermType type{TermType::Rate};
+        Scalar weight{1.0};
+        Scalar targetRate{0.0};        //!< MatchConst (internal units)
+        std::string referenceCase{};   //!< MatchRef
+        // observed curve (lazily loaded)
+        mutable bool loaded{false};
+        mutable std::vector<Scalar> obsTimes;   //!< days
+        mutable std::vector<Scalar> obsValues;  //!< internal units/sign
+    };
+
     explicit AdjointObjectiveFunction(const std::string& spec)
     {
         if (spec.empty() || spec == "pressure-average") {
@@ -81,58 +99,67 @@ public:
                           "--adjoint-objective=bhp:<WELL> needs a well name");
             }
         } else if (spec.rfind("rate:", 0) == 0) {
-            // rate:<WELL>:<oil|water|gas> -- J = sum_k dt_k q_phase(k),
-            // i.e. the cumulative produced/injected surface volume.
-            kind_ = Kind::WellRate;
-            const auto rest = spec.substr(5);
-            const auto colon = rest.find(':');
-            if (colon == std::string::npos) {
-                OPM_THROW(std::runtime_error,
-                          "--adjoint-objective=rate:<WELL>:<oil|water|gas>");
-            }
-            wellName_ = rest.substr(0, colon);
-            parsePhase_(rest.substr(colon + 1));
+            kind_ = Kind::RateTerms;
+            const auto parts = split_(spec.substr(5), ':', 2);
+            RateTerm term;
+            term.well = parts[0];
+            setPhase_(term, parts[1]);
+            term.type = TermType::Rate;
+            terms_.push_back(std::move(term));
         } else if (spec.rfind("match:", 0) == 0) {
-            // match:<WELL>:<oil|water|gas>:<target sm3/day> --
-            // J = sum_k dt_k (q_phase(k) - q_target)^2 : the quadratic
-            // misfit form of well-curve matching with a constant target
-            // (per-step observed curves via ESmry are pure I/O on top).
-            kind_ = Kind::WellRateMatch;
-            const auto rest = spec.substr(6);
-            const auto c1 = rest.find(':');
-            const auto c2 = (c1 == std::string::npos)
-                ? std::string::npos : rest.find(':', c1 + 1);
-            if (c2 == std::string::npos) {
-                OPM_THROW(std::runtime_error,
-                          "--adjoint-objective=match:<WELL>:<phase>:<target sm3/day>");
-            }
-            wellName_ = rest.substr(0, c1);
-            parsePhase_(rest.substr(c1 + 1, c2 - c1 - 1));
-            // surface rates are SI (m3/s) internally
-            targetRate_ = std::stod(rest.substr(c2 + 1)) / 86400.0;
+            kind_ = Kind::RateTerms;
+            const auto parts = split_(spec.substr(6), ':', 3);
+            RateTerm term;
+            term.well = parts[0];
+            setPhase_(term, parts[1]);
+            term.type = TermType::MatchConst;
+            term.targetRate = std::stod(parts[2]) / 86400.0; // sm3/day -> SI
+            terms_.push_back(std::move(term));
         } else if (spec.rfind("matchref:", 0) == 0) {
-            // matchref:<WELL>:<phase>:<reference case> --
-            // J = sum_k dt_k (q(t_k) - q_obs(t_k))^2 with the observed
-            // curve read from the reference run's summary (ESmry) and
-            // interpolated linearly in time. Producers only in v1.
-            kind_ = Kind::WellRateMatchRef;
+            kind_ = Kind::RateTerms;
+            const auto parts = split_(spec.substr(9), ':', 3);
+            RateTerm term;
+            term.well = parts[0];
+            setPhase_(term, parts[1]);
+            term.type = TermType::MatchRef;
+            term.referenceCase = parts[2];
+            terms_.push_back(std::move(term));
+        } else if (spec.rfind("matchsum:", 0) == 0) {
+            // matchsum:<refcase>:<W>.<p>[+<W>.<p>]...
+            kind_ = Kind::RateTerms;
             const auto rest = spec.substr(9);
-            const auto c1 = rest.find(':');
-            const auto c2 = (c1 == std::string::npos)
-                ? std::string::npos : rest.find(':', c1 + 1);
-            if (c2 == std::string::npos) {
+            const auto lastColon = rest.rfind(':');
+            if (lastColon == std::string::npos) {
                 OPM_THROW(std::runtime_error,
-                          "--adjoint-objective=matchref:<WELL>:<phase>:<refcase>");
+                          "--adjoint-objective=matchsum:<refcase>:<W>.<p>[+<W>.<p>]...");
             }
-            wellName_ = rest.substr(0, c1);
-            parsePhase_(rest.substr(c1 + 1, c2 - c1 - 1));
-            referenceCase_ = rest.substr(c2 + 1);
+            const std::string refcase = rest.substr(0, lastColon);
+            const std::string termsSpec = rest.substr(lastColon + 1);
+            std::size_t pos = 0;
+            while (pos != std::string::npos && pos < termsSpec.size()) {
+                const auto plus = termsSpec.find('+', pos);
+                const std::string one = termsSpec.substr(
+                    pos, plus == std::string::npos ? std::string::npos : plus - pos);
+                const auto dot = one.find('.');
+                if (dot == std::string::npos) {
+                    OPM_THROW(std::runtime_error,
+                              "matchsum term '" + one + "' must be <WELL>.<phase>");
+                }
+                RateTerm term;
+                term.well = one.substr(0, dot);
+                setPhase_(term, one.substr(dot + 1));
+                term.type = TermType::MatchRef;
+                term.referenceCase = refcase;
+                terms_.push_back(std::move(term));
+                pos = (plus == std::string::npos) ? std::string::npos : plus + 1;
+            }
+            if (terms_.empty()) {
+                OPM_THROW(std::runtime_error,
+                          "matchsum objective without terms");
+            }
         } else {
             OPM_THROW(std::runtime_error,
-                      "Unknown adjoint objective '" + spec +
-                      "' (expected 'pressure-average', 'bhp:<WELL>', "
-                      "'rate:<WELL>:<phase>', 'match:<WELL>:<phase>:<target>' "
-                      "or 'matchref:<WELL>:<phase>:<refcase>')");
+                      "Unknown adjoint objective '" + spec + "'");
         }
     }
 
@@ -141,6 +168,19 @@ public:
 
     const std::string& wellName() const
     { return wellName_; }
+
+    const std::vector<RateTerm>& rateTerms() const
+    { return terms_; }
+
+    //! \brief True if the objective has well terms involving \p well.
+    bool involvesWell(const std::string& well) const
+    {
+        if (kind_ == Kind::WellBhp) {
+            return well == wellName_;
+        }
+        return std::any_of(terms_.begin(), terms_.end(),
+                           [&well](const auto& t) { return t.well == well; });
+    }
 
     //! \brief Value contribution of substep \p k; the simulator must hold
     //!        the (recorded) state of substep k.
@@ -164,32 +204,18 @@ public:
                 simulator.problem().wellModel().wellState();
             return dt * wellState.well(wellName_).bhp;
         }
-        case Kind::WellRate: {
+        case Kind::RateTerms: {
             const auto& wellState =
                 simulator.problem().wellModel().wellState();
-            const int phasePos =
-                FluidSystem::canonicalToActivePhaseIdx(canonicalPhaseIdx_);
-            return dt * wellState.well(wellName_).surface_rates[phasePos];
-        }
-        case Kind::WellRateMatch: {
-            const auto& wellState =
-                simulator.problem().wellModel().wellState();
-            const int phasePos =
-                FluidSystem::canonicalToActivePhaseIdx(canonicalPhaseIdx_);
-            const Scalar diff =
-                wellState.well(wellName_).surface_rates[phasePos] - targetRate_;
-            return dt * diff * diff;
-        }
-        case Kind::WellRateMatchRef: {
-            const auto& wellState =
-                simulator.problem().wellModel().wellState();
-            const int phasePos =
-                FluidSystem::canonicalToActivePhaseIdx(canonicalPhaseIdx_);
-            const Scalar tEnd = simulator.time() + dt;
-            const Scalar diff =
-                wellState.well(wellName_).surface_rates[phasePos] -
-                observedRate(simulator, tEnd);
-            return dt * diff * diff;
+            Scalar sum = 0.0;
+            for (const auto& term : terms_) {
+                const int phasePos =
+                    FluidSystem::canonicalToActivePhaseIdx(term.canonicalPhaseIdx);
+                const Scalar q =
+                    wellState.well(term.well).surface_rates[phasePos];
+                sum += termValue_(simulator, term, dt, q);
+            }
+            return sum;
         }
         }
         return 0.0;
@@ -211,9 +237,7 @@ public:
         }
     }
 
-    //! \brief dJ_k/d(bhp of \p well) — nonzero only for the bhp objective
-    //!        and the selected well. The BHP is the last well primary
-    //!        variable of a StandardWell.
+    //! \brief dJ_k/d(bhp of \p well) for the bhp objective.
     Scalar bhpGradient(const std::string& well, double dt) const
     {
         if (kind_ == Kind::WellBhp && well == wellName_) {
@@ -222,95 +246,89 @@ public:
         return 0.0;
     }
 
-    //! \brief dJ_k/d(rate) weight: dt for the plain rate objective,
-    //!        2 dt (q - q_target/q_obs(tEnd)) for the quadratic matches
-    //!        (q = current rate of the selected phase).
-    Scalar rateWeight(const Simulator& simulator, const std::string& well,
+    //! \brief dJ_k/dq weight of one rate term given the current rate \p q.
+    Scalar termWeight(const Simulator& simulator, const RateTerm& term,
                       double dt, Scalar q) const
     {
-        if (well != wellName_) {
-            return 0.0;
-        }
-        if (kind_ == Kind::WellRate) {
-            return dt;
-        }
-        if (kind_ == Kind::WellRateMatch) {
-            return 2.0 * dt * (q - targetRate_);
-        }
-        if (kind_ == Kind::WellRateMatchRef) {
+        switch (term.type) {
+        case TermType::Rate:
+            return term.weight * dt;
+        case TermType::MatchConst:
+            return term.weight * 2.0 * dt * (q - term.targetRate);
+        case TermType::MatchRef: {
             const Scalar tEnd = simulator.time() + dt;
-            return 2.0 * dt * (q - observedRate(simulator, tEnd));
+            return term.weight * 2.0 * dt *
+                   (q - observedRate_(simulator, term, tEnd));
+        }
         }
         return 0.0;
     }
 
-    //! \brief Observed rate (internal sign and units) at time \p t [s],
-    //!        interpolated linearly from the reference summary.
-    Scalar observedRate(const Simulator& simulator, Scalar t) const
+private:
+    Scalar termValue_(const Simulator& simulator, const RateTerm& term,
+                      double dt, Scalar q) const
     {
-        if (!observationsLoaded_) {
-            loadObservations_(simulator);
+        switch (term.type) {
+        case TermType::Rate:
+            return term.weight * dt * q;
+        case TermType::MatchConst: {
+            const Scalar diff = q - term.targetRate;
+            return term.weight * dt * diff * diff;
+        }
+        case TermType::MatchRef: {
+            const Scalar tEnd = simulator.time() + dt;
+            const Scalar diff = q - observedRate_(simulator, term, tEnd);
+            return term.weight * dt * diff * diff;
+        }
+        }
+        return 0.0;
+    }
+
+    //! \brief Observed rate (internal sign/units) at time \p t [s].
+    Scalar observedRate_(const Simulator& simulator, const RateTerm& term,
+                         Scalar t) const
+    {
+        if (!term.loaded) {
+            loadObservations_(simulator, term);
         }
         const Scalar tDays = t / 86400.0;
-        const auto& times = obsTimes_;
+        const auto& times = term.obsTimes;
         if (times.empty()) {
             OPM_THROW(std::runtime_error, "Empty observed curve");
         }
         if (tDays <= times.front()) {
-            return obsValues_.front();
+            return term.obsValues.front();
         }
         if (tDays >= times.back()) {
-            return obsValues_.back();
+            return term.obsValues.back();
         }
         const auto it = std::upper_bound(times.begin(), times.end(), tDays);
         const std::size_t hi = it - times.begin();
         const Scalar w = (tDays - times[hi - 1]) / (times[hi] - times[hi - 1]);
-        return (1.0 - w) * obsValues_[hi - 1] + w * obsValues_[hi];
+        return (1.0 - w) * term.obsValues[hi - 1] + w * term.obsValues[hi];
     }
 
-    //! \brief Active component index of the objective's rate phase.
-    unsigned activeCompIdx() const
-    { return FluidSystem::canonicalToActiveCompIdx(canonicalCompIdx_); }
-
-private:
-    void parsePhase_(const std::string& phase)
-    {
-        if (phase == "oil") {
-            canonicalPhaseIdx_ = FluidSystem::oilPhaseIdx;
-            canonicalCompIdx_ = FluidSystem::oilCompIdx;
-        } else if (phase == "water") {
-            canonicalPhaseIdx_ = FluidSystem::waterPhaseIdx;
-            canonicalCompIdx_ = FluidSystem::waterCompIdx;
-        } else if (phase == "gas") {
-            canonicalPhaseIdx_ = FluidSystem::gasPhaseIdx;
-            canonicalCompIdx_ = FluidSystem::gasCompIdx;
-        } else {
-            OPM_THROW(std::runtime_error,
-                      "Unknown phase '" + phase + "' in adjoint objective");
-        }
-    }
-
-    void loadObservations_(const Simulator& simulator) const
+    void loadObservations_(const Simulator& simulator, const RateTerm& term) const
     {
         const auto& schedule = simulator.vanguard().schedule();
-        const auto& well = schedule.getWell(wellName_, simulator.episodeIndex());
+        const auto& well = schedule.getWell(term.well, simulator.episodeIndex());
         if (!well.isProducer()) {
             OPM_THROW(std::runtime_error,
                       "matchref objectives support producers only (v1)");
         }
         std::string keyword;
-        if (canonicalPhaseIdx_ == FluidSystem::oilPhaseIdx) {
-            keyword = "WOPR:" + wellName_;
-        } else if (canonicalPhaseIdx_ == FluidSystem::waterPhaseIdx) {
-            keyword = "WWPR:" + wellName_;
+        if (term.canonicalPhaseIdx == FluidSystem::oilPhaseIdx) {
+            keyword = "WOPR:" + term.well;
+        } else if (term.canonicalPhaseIdx == FluidSystem::waterPhaseIdx) {
+            keyword = "WWPR:" + term.well;
         } else {
-            keyword = "WGPR:" + wellName_;
+            keyword = "WGPR:" + term.well;
         }
 
-        EclIO::ESmry summary(referenceCase_);
+        EclIO::ESmry summary(term.referenceCase);
         summary.loadData();
         const auto& time = summary.get("TIME");      // days
-        const auto& rate = summary.get(keyword);     // in file units, positive
+        const auto& rate = summary.get(keyword);     // file units, positive
 
         // Convert the file's rate unit to internal SI (m3/s).
         const std::string unit = summary.get_unit(keyword);
@@ -327,24 +345,53 @@ private:
                       "' in reference summary for " + keyword);
         }
 
-        obsTimes_.assign(time.begin(), time.end());
-        obsValues_.resize(rate.size());
+        term.obsTimes.assign(time.begin(), time.end());
+        term.obsValues.resize(rate.size());
         for (std::size_t i = 0; i < rate.size(); ++i) {
             // internal convention: producer rates are negative
-            obsValues_[i] = -static_cast<Scalar>(rate[i]) * toSi;
+            term.obsValues[i] = -static_cast<Scalar>(rate[i]) * toSi;
         }
-        observationsLoaded_ = true;
+        term.loaded = true;
+    }
+
+    void setPhase_(RateTerm& term, const std::string& phase) const
+    {
+        if (phase == "oil") {
+            term.canonicalPhaseIdx = FluidSystem::oilPhaseIdx;
+            term.canonicalCompIdx = FluidSystem::oilCompIdx;
+        } else if (phase == "water") {
+            term.canonicalPhaseIdx = FluidSystem::waterPhaseIdx;
+            term.canonicalCompIdx = FluidSystem::waterCompIdx;
+        } else if (phase == "gas") {
+            term.canonicalPhaseIdx = FluidSystem::gasPhaseIdx;
+            term.canonicalCompIdx = FluidSystem::gasCompIdx;
+        } else {
+            OPM_THROW(std::runtime_error,
+                      "Unknown phase '" + phase + "' in adjoint objective");
+        }
+    }
+
+    static std::vector<std::string> split_(const std::string& text,
+                                           char sep, std::size_t expected)
+    {
+        std::vector<std::string> parts;
+        std::size_t pos = 0;
+        while (parts.size() + 1 < expected) {
+            const auto next = text.find(sep, pos);
+            if (next == std::string::npos) {
+                OPM_THROW(std::runtime_error,
+                          "Malformed adjoint objective specification: " + text);
+            }
+            parts.push_back(text.substr(pos, next - pos));
+            pos = next + 1;
+        }
+        parts.push_back(text.substr(pos));
+        return parts;
     }
 
     Kind kind_{Kind::PressureAverage};
-    std::string wellName_{};
-    unsigned canonicalPhaseIdx_{0};
-    unsigned canonicalCompIdx_{0};
-    Scalar targetRate_{0.0};
-    std::string referenceCase_{};
-    mutable bool observationsLoaded_{false};
-    mutable std::vector<Scalar> obsTimes_;
-    mutable std::vector<Scalar> obsValues_;
+    std::string wellName_{};           //!< bhp objective
+    std::vector<RateTerm> terms_;      //!< rate-family objectives
 };
 
 } // namespace Opm
