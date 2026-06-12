@@ -57,6 +57,7 @@
 #include <fmt/format.h>
 
 #include <fstream>
+#include <map>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -317,6 +318,13 @@ private:
                 line += " " + std::to_string(lambdaW[j]);
             }
             wellAdjointLog_.push_back(std::move(line));
+
+            // Control-target gradient: the active control equation is the
+            // last well-equation row with the convention
+            // R_ctrl = (rate or bhp) - target, so dR_ctrl/d(target) = -1
+            // and dJ/d(target) accumulates -lambda_w[last] over the
+            // substeps where this control is active.
+            controlGradient_[stdWell->name()] -= lambdaW[numWellEq - 1];
         }
     }
 
@@ -415,6 +423,16 @@ private:
             }
         }
         {
+            std::ofstream os(base + ".ADJOINT_GRADIENTS_WELLCTRL.txt");
+            os.precision(16);
+            os << "# dJ/d(active control target) per well, summed over all "
+                  "substeps; SI units (rate targets: per m3/s, bhp targets: "
+                  "per Pa)\n";
+            for (const auto& [well, value] : controlGradient_) {
+                os << well << " " << value << "\n";
+            }
+        }
+        {
             std::ofstream os(base + ".ADJOINT_LAMBDA_WELLS.txt");
             os << "# substep well lambda_w (one line per well per substep, "
                   "backward order)\n";
@@ -435,6 +453,7 @@ private:
     std::vector<std::pair<std::size_t, unsigned>> faces_;
     std::vector<Scalar> gradientTrans_;
     std::vector<std::string> wellAdjointLog_;
+    std::map<std::string, Scalar> controlGradient_;
 };
 
 } // namespace Opm
