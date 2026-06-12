@@ -49,6 +49,23 @@ struct AdjointMode { static constexpr auto value = ""; };
 //!        selects the HDF5 backend, anything else a plain directory store.
 struct AdjointFile { static constexpr auto value = ""; };
 
+//! \brief Linear solver for the transposed adjoint systems:
+//!        umfpack (direct, default) | ilu0 | cpr | cprt | <file>.json
+//!        (FlexibleSolver configuration).
+struct AdjointLinearSolver { static constexpr auto value = "umfpack"; };
+
+//! \brief Relative residual reduction for iterative adjoint solves.
+//!        Tighter than forward solves: lambda accuracy multiplies dR/dm
+//!        directly in the gradients.
+struct AdjointLinearSolverReduction { static constexpr double value = 1e-14; };
+
+//! \brief Iteration cap for iterative adjoint solves.
+struct AdjointLinearSolverMaxIter { static constexpr int value = 300; };
+
+//! \brief Verbosity for the adjoint linear solver (passed to
+//!        FlexibleSolver; 0 = quiet).
+struct AdjointLinearSolverVerbosity { static constexpr int value = 0; };
+
 //! \brief Comma-separated list of end-point scaling parameters to
 //!        compute gradients for (e.g. "SWL,KRW"); empty disables.
 struct AdjointEndpoints { static constexpr auto value = ""; };
@@ -82,6 +99,10 @@ struct AdjointConfig
     double replayAbsTolerance{1e-9};
     std::string objective{};  //!< objective specification
     std::string endpoints{};  //!< end-point parameter list
+    std::string linearSolver{};  //!< adjoint linear solver spec
+    double linearSolverReduction{1e-14};
+    int linearSolverMaxIter{300};
+    int linearSolverVerbosity{0};
 
     static AdjointConfig fromParameters();
 };

@@ -35,6 +35,13 @@ AdjointConfig AdjointConfig::fromParameters()
     config.replayAbsTolerance = Parameters::Get<Parameters::AdjointReplayAbsTolerance>();
     config.objective = Parameters::Get<Parameters::AdjointObjective>();
     config.endpoints = Parameters::Get<Parameters::AdjointEndpoints>();
+    config.linearSolver = Parameters::Get<Parameters::AdjointLinearSolver>();
+    config.linearSolverReduction =
+        Parameters::Get<Parameters::AdjointLinearSolverReduction>();
+    config.linearSolverMaxIter =
+        Parameters::Get<Parameters::AdjointLinearSolverMaxIter>();
+    config.linearSolverVerbosity =
+        Parameters::Get<Parameters::AdjointLinearSolverVerbosity>();
     return config;
 }
 
@@ -56,6 +63,15 @@ void registerAdjointParameters()
     Parameters::Register<Parameters::AdjointReplayTolerance>
         ("Relative tolerance for comparing re-linearized systems against "
          "stored ones in adjoint replay");
+    Parameters::Register<Parameters::AdjointLinearSolver>
+        ("Linear solver for the transposed adjoint systems: umfpack "
+         "(direct), ilu0, cpr, cprt, or a FlexibleSolver *.json file");
+    Parameters::Register<Parameters::AdjointLinearSolverReduction>
+        ("Relative residual reduction for iterative adjoint solves");
+    Parameters::Register<Parameters::AdjointLinearSolverMaxIter>
+        ("Maximum iterations for iterative adjoint solves");
+    Parameters::Register<Parameters::AdjointLinearSolverVerbosity>
+        ("Verbosity of the adjoint linear solver");
     Parameters::Register<Parameters::AdjointEndpoints>
         ("Comma-separated saturation end-point parameters for adjoint "
          "gradients (SWL, SWCR, KRW, ...); empty disables");

@@ -352,10 +352,13 @@ substep, negligible next to the solve, and it makes every existing solver/precon
 unchanged. Concretely:
 - v1 (tests, small/medium decks): explicit `Mᵀ` + `Dune::UMFPack` (direct — removes one error
   source while validating the recursion).
-- v1.5 (already available, no new code): explicit `Mᵀ` + FlexibleSolver with the existing
-  **`cprt`** preconditioner (transposed quasi-IMPES weights + transposed transfer,
-  `StandardPreconditioners_serial.hpp`/`_mpi.hpp`) + BiCGSTAB/GMRES, selected via the JSON
-  linear-solver config. An early spike should benchmark cprt-on-Mᵀ vs ILU0-on-Mᵀ on SPE1/model2.
+- v1.5 **DONE (2026-06-12)**: explicit `Mᵀ` + FlexibleSolver behind
+  `--adjoint-linear-solver=ilu0|cpr|cprt|<json>` (flow's own setupILU/setupCPR property trees,
+  quasi-IMPES weights with the transpose flag). SPE1 spike result: cprt ~5-7 avg iterations vs
+  ~20 for ILU0/cpr on the same transposed matrix — **cprt healthy and clearly the right
+  preconditioner**; gradient agreement vs UMFPACK tracks the linear reduction (1e-12 → 3e-4,
+  1e-14 → 7e-7, 1e-16 → 5e-9 on PV), confirming the solver-accuracy warning below; default
+  reduction set to 1e-14 (~1 extra iteration per solve).
 - Later only if memory/GPU demands it: matrix-free transposed operator (`mtv`-based) with a
   native transposed preconditioner.
 

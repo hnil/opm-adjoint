@@ -20,17 +20,37 @@
  * \file
  * \brief Linear solver for the per-timestep adjoint systems J^T lambda = rhs.
  *
- * v1 strategy (see adjoint_plan.md): transpose the assembled matrix
- * explicitly and use a direct solver (UMFPACK). This removes one error
- * source while the adjoint recursion itself is validated; an iterative
- * path (FlexibleSolver with the existing transposed-CPR preconditioner
- * "cprt" on the explicitly transposed matrix) can be added behind the
- * same interface later. Serial only.
+ * The transpose is always formed explicitly (one structural pass plus a
+ * value copy - negligible next to the solve), which makes every existing
+ * solver and preconditioner usable unchanged. Two paths behind one
+ * interface (--adjoint-linear-solver):
+ *
+ *  - "umfpack" (default): direct solve, removes one error source while
+ *    the adjoint recursion itself is validated;
+ *  - iterative (the plan's v1.5): FlexibleSolver on the transposed
+ *    matrix, configured by preset name "ilu0" / "cpr" / "cprt" (flow's
+ *    own property-tree defaults via setupILU/setupCPR) or a FlexibleSolver
+ *    JSON file. "cprt" is CPR built for transposed systems
+ *    (PressureTransferPolicy<transpose=true> + quasi-IMPES weights with
+ *    transpose=true), i.e. the canonical adjoint preconditioner; "cpr"
+ *    on the transposed matrix is kept for comparison. trueimpes weights
+ *    need simulator internals and are not supported here - quasiimpes
+ *    only.
+ *
+ * Serial only (MPI is a later milestone; UMFPACK and the sequential
+ * MatrixAdapter both assume one rank).
  */
 #ifndef OPM_ADJOINT_LINEAR_SOLVER_HPP
 #define OPM_ADJOINT_LINEAR_SOLVER_HPP
 
 #include <opm/common/ErrorMacros.hpp>
+#include <opm/common/OpmLog/OpmLog.hpp>
+#include <opm/simulators/linalg/PropertyTree.hpp>
+
+#include <opm/simulators/linalg/FlexibleSolver.hpp>
+#include <opm/simulators/linalg/FlowLinearSolverParameters.hpp>
+#include <opm/simulators/linalg/getQuasiImpesWeights.hpp>
+#include <opm/simulators/linalg/setupPropertyTree.hpp>
 
 #include <opm/adjoint/transposeMatrix.hpp>
 
@@ -38,13 +58,18 @@
 #include <dune/istl/umfpack.hh>
 #endif
 
+#include <dune/istl/operators.hh>
 #include <dune/istl/solver.hh>
 
+#include <fmt/format.h>
+
+#include <functional>
 #include <stdexcept>
+#include <string>
 
 namespace Opm {
 
-//! \brief Direct solver for transposed systems.
+//! \brief Solver for transposed systems A^T x = b.
 //!
 //! \tparam Matrix BCRS matrix with square dense blocks (double scalar).
 //! \tparam Vector Block vector matching the matrix block size.
@@ -52,17 +77,92 @@ template<class Matrix, class Vector>
 class AdjointLinearSolver
 {
 public:
+    //! \brief Select solver and tolerances; must be called before solves.
+    //!
+    //! \param spec "umfpack", "ilu0", "cpr", "cprt", or a path to a
+    //!             FlexibleSolver JSON configuration (*.json).
+    //! \param pressureIndex pressure variable index for CPR-type
+    //!                      preconditioners (blackoil: 1).
+    void configure(const std::string& spec,
+                   double reduction,
+                   int maxIter,
+                   int verbosity,
+                   std::size_t pressureIndex)
+    {
+        spec_ = spec.empty() ? "umfpack" : spec;
+        pressureIndex_ = pressureIndex;
+        if (spec_ == "umfpack") {
+            return;
+        }
+
+        FlowLinearSolverParameters params; // reset() defaults
+        params.linear_solver_reduction_ = reduction;
+        params.linear_solver_maxiter_ = maxIter;
+        params.linear_solver_verbosity_ = verbosity;
+
+        if (spec_.size() > 5 && spec_.substr(spec_.size() - 5) == ".json") {
+            prm_ = PropertyTree(spec_);
+        } else if (spec_ == "ilu0") {
+            prm_ = setupILU(spec_, params);
+        } else if (spec_ == "cpr" || spec_ == "cprt") {
+            prm_ = setupCPR("cpr_quasiimpes", params);
+            prm_.put("preconditioner.type", spec_);
+        } else {
+            OPM_THROW(std::runtime_error,
+                      "Unknown --adjoint-linear-solver '" + spec_ +
+                      "' (use umfpack, ilu0, cpr, cprt or a "
+                      "FlexibleSolver *.json file)");
+        }
+
+        const auto precType =
+            prm_.get<std::string>("preconditioner.type", "");
+        usesCprWeights_ = (precType == "cpr" || precType == "cprt" ||
+                           precType == "cprw" || precType == "cprwt");
+        transposedWeights_ = (precType == "cprt" || precType == "cprwt");
+        if (usesCprWeights_) {
+            const auto weightsType =
+                prm_.get<std::string>("preconditioner.weight_type",
+                                      "quasiimpes");
+            if (weightsType != "quasiimpes") {
+                OPM_THROW(std::runtime_error,
+                          "Adjoint CPR supports quasiimpes weights only "
+                          "(trueimpes needs forward-simulator internals)");
+            }
+        }
+    }
+
     //! \brief Solve A^T x = b.
     //!
-    //! The transpose is formed explicitly; the right-hand side is taken
-    //! by value because direct solvers overwrite it.
+    //! The right-hand side is taken by value because solvers overwrite it.
     void solveTransposed(const Matrix& matrix, Vector rhs, Vector& solution)
+    {
+        solution.resize(rhs.size());
+        solution = 0.0;
+
+        if (spec_ == "umfpack") {
+            solveDirect_(matrix, rhs, solution);
+        } else {
+            solveIterative_(matrix, rhs, solution);
+        }
+        ++numSolves_;
+    }
+
+    //! \brief Iterations of the iterative path summed over all solves
+    //!        (0 for umfpack).
+    int totalIterations() const
+    { return totalIterations_; }
+
+    int numSolves() const
+    { return numSolves_; }
+
+    const std::string& spec() const
+    { return spec_; }
+
+private:
+    void solveDirect_(const Matrix& matrix, Vector& rhs, Vector& solution)
     {
 #if HAVE_SUITESPARSE_UMFPACK
         const auto transposed = transposeBlockMatrix(matrix);
-
-        solution.resize(rhs.size());
-        solution = 0.0;
 
         Dune::UMFPack<TransposedMatrix<Matrix>> solver(transposed, /*verbose=*/0);
         Dune::InverseOperatorResult result;
@@ -77,10 +177,61 @@ public:
         static_cast<void>(rhs);
         static_cast<void>(solution);
         OPM_THROW(std::runtime_error,
-                  "AdjointLinearSolver requires UMFPACK (SuiteSparse); "
-                  "this build has no SuiteSparse support.");
+                  "--adjoint-linear-solver=umfpack requires SuiteSparse; "
+                  "this build has no SuiteSparse support. Use an iterative "
+                  "solver (ilu0, cpr, cprt or a *.json config).");
 #endif
     }
+
+    void solveIterative_(const Matrix& matrix, Vector& rhs, Vector& solution)
+    {
+        const Matrix transposed = transposeBlockMatrixSameType(matrix);
+
+        using Operator = Dune::MatrixAdapter<Matrix, Vector, Vector>;
+        Operator op(transposed);
+
+        std::function<Vector()> weightsCalculator;
+        if (usesCprWeights_) {
+            // mirror of ISTLSolver::getWeightsCalculator (quasiimpes
+            // branch): weights from the matrix handed to the
+            // preconditioner - here the transposed matrix - with the
+            // transpose flag matching the cprt/cpr choice.
+            const auto& matrixRef = transposed;
+            const bool transposeFlag = transposedWeights_;
+            const std::size_t pIdx = pressureIndex_;
+            weightsCalculator = [&matrixRef, transposeFlag, pIdx]() {
+                return Amg::getQuasiImpesWeights<Matrix, Vector>(
+                    matrixRef, pIdx, transposeFlag,
+                    /*enable_thread_parallel=*/false);
+            };
+        }
+
+        Dune::FlexibleSolver<Operator> solver(op, prm_, weightsCalculator,
+                                              pressureIndex_);
+        Dune::InverseOperatorResult result;
+        solver.apply(solution, rhs, result);
+
+        if (!result.converged) {
+            OPM_THROW(std::runtime_error,
+                      fmt::format("Adjoint linear solver '{}' did not "
+                                  "converge in {} iterations "
+                                  "(reduction achieved {:.3e})",
+                                  spec_, result.iterations,
+                                  result.reduction));
+        }
+        totalIterations_ += result.iterations;
+        OpmLog::debug(fmt::format("adjoint linear solve ({}): {} iterations, "
+                                  "reduction {:.3e}",
+                                  spec_, result.iterations, result.reduction));
+    }
+
+    std::string spec_{"umfpack"};
+    PropertyTree prm_{};
+    bool usesCprWeights_ = false;
+    bool transposedWeights_ = false;
+    std::size_t pressureIndex_ = 1;
+    int totalIterations_ = 0;
+    int numSolves_ = 0;
 };
 
 } // namespace Opm

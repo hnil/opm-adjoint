@@ -92,10 +92,18 @@ public:
     explicit AdjointSolver(Simulator& simulator)
         : simulator_(simulator)
         , replay_(simulator)
-        , objective_(AdjointConfig::fromParameters().objective)
+        , config_(AdjointConfig::fromParameters())
+        , objective_(config_.objective)
     {
         replay_.setComputeBdiag(true);
-        const std::string endpointSpec = AdjointConfig::fromParameters().endpoints;
+        constexpr std::size_t pressureIndex =
+            GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
+        linearSolver_.configure(config_.linearSolver,
+                                config_.linearSolverReduction,
+                                config_.linearSolverMaxIter,
+                                config_.linearSolverVerbosity,
+                                pressureIndex);
+        const std::string endpointSpec = config_.endpoints;
         std::size_t pos = 0;
         while (pos != std::string::npos && pos < endpointSpec.size()) {
             const auto comma = endpointSpec.find(',', pos);
@@ -203,6 +211,14 @@ public:
         OpmLog::info(fmt::format(
             "Adjoint sweep finished: J = {:.16e}, {} substeps, {} replay "
             "verification failures", objectiveValue, numSubsteps, replayFailures));
+        if (linearSolver_.totalIterations() > 0) {
+            OpmLog::info(fmt::format(
+                "Adjoint linear solver '{}': {} iterations over {} solves "
+                "(avg {:.1f})", linearSolver_.spec(),
+                linearSolver_.totalIterations(), linearSolver_.numSolves(),
+                double(linearSolver_.totalIterations()) /
+                    std::max(1, linearSolver_.numSolves())));
+        }
 
         writeResults_(objectiveValue);
         return replayFailures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -619,6 +635,7 @@ private:
     }
 
     Simulator& simulator_;
+    AdjointConfig config_;
     Replay replay_;
     AdjointObjectiveFunction<TypeTag> objective_;
     AdjointLinearSolver<Matrix, Vector> linearSolver_;

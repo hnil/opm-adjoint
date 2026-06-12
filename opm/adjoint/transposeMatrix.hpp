@@ -62,13 +62,15 @@ using TransposedMatrix = Dune::BCRSMatrix<
                       static_cast<int>(Matrix::block_type::cols),
                       static_cast<int>(Matrix::block_type::rows)>>;
 
-//! \brief Build the transpose of a BCRS matrix with square dense blocks.
+//! \brief Build the transpose of a BCRS matrix with square dense blocks,
+//!        with a caller-chosen result matrix type (block types must have
+//!        compatible dimensions).
 //!
 //! The returned matrix has the transposed sparsity pattern and each block
 //! is the transpose of the corresponding source block:
 //! (A^T)_{ji} = (A_{ij})^T.
-template<class Matrix>
-TransposedMatrix<Matrix> transposeBlockMatrix(const Matrix& matrix)
+template<class OutMatrix, class Matrix>
+OutMatrix transposeBlockMatrixTo(const Matrix& matrix)
 {
     Dune::MatrixIndexSet indices(matrix.M(), matrix.N());
     for (auto row = matrix.begin(); row != matrix.end(); ++row) {
@@ -77,7 +79,7 @@ TransposedMatrix<Matrix> transposeBlockMatrix(const Matrix& matrix)
         }
     }
 
-    TransposedMatrix<Matrix> transposed;
+    OutMatrix transposed;
     indices.exportIdx(transposed);
 
     for (auto row = matrix.begin(); row != matrix.end(); ++row) {
@@ -92,6 +94,23 @@ TransposedMatrix<Matrix> transposeBlockMatrix(const Matrix& matrix)
         }
     }
     return transposed;
+}
+
+//! \brief Transpose into plain-FieldMatrix blocks (for direct solvers:
+//!        Dune::UMFPack rejects Opm::MatrixBlock).
+template<class Matrix>
+TransposedMatrix<Matrix> transposeBlockMatrix(const Matrix& matrix)
+{
+    return transposeBlockMatrixTo<TransposedMatrix<Matrix>>(matrix);
+}
+
+//! \brief Transpose preserving the source matrix type (for the iterative
+//!        path: FlexibleSolver/PreconditionerFactory are pre-instantiated
+//!        in opm-simulators for Opm::MatrixBlock-blocked BCRS).
+template<class Matrix>
+Matrix transposeBlockMatrixSameType(const Matrix& matrix)
+{
+    return transposeBlockMatrixTo<Matrix>(matrix);
 }
 
 } // namespace Opm

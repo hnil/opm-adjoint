@@ -200,6 +200,46 @@ terms) **1.3e-8 / 1.4e-8 / 4.8e-8**. ctest: `adjoint_fd_endpoint_swl`.
 Note the usual control-mode duality: with the producer rewritten to
 ORAT, a rate objective is pinned and dJ/dθ = 0 on both sides.
 
+### Iterative adjoint solves (v1.5) — cprt health check PASSED
+
+`--adjoint-linear-solver=umfpack|ilu0|cpr|cprt|<file>.json` selects the
+solver for the transposed systems (default umfpack). The iterative path
+is FlexibleSolver on the explicitly transposed Schur-reduced matrix
+(transposed into the same Opm::MatrixBlock type, so the pre-instantiated
+sequential MatrixAdapter operators apply — no extra template
+instantiations); presets reuse flow's own property trees (setupILU /
+setupCPR with quasi-IMPES weights, transpose flag matching cpr/cprt).
+Companion knobs: `--adjoint-linear-solver-reduction` (default 1e-14),
+`--adjoint-linear-solver-max-iter`, `--adjoint-linear-solver-verbosity`.
+
+```bash
+tests/run-adjoint-solver-test.sh <flow_adjoint> <deck.DATA> <outdir> [rel-tol] [solvers...]
+```
+
+Results (SPE1CASE1, 125 backward solves, pressure-average objective):
+
+| solver | avg iters | max rel diff vs umfpack (PV) |
+|---|---|---|
+| ilu0 | 20.1 | 7e-5 (reduction 1e-12) |
+| cpr  | 20.3 | 2e-4 (reduction 1e-12) |
+| cprt | 5.2 / 6.2 / 7.1 | 3e-4 / 7e-7 / 5e-9 (reduction 1e-12 / 1e-14 / 1e-16) |
+
+Two findings: (1) **cprt works and is the right preconditioner for the
+transposed system** — ~4x fewer iterations than ILU0 or forward-cpr on
+the same transposed matrix (the health check the plan asked for; cprt
+had not been exercised in years); (2) the plan's accuracy warning is
+real — gradient agreement tracks the linear reduction almost linearly
+(accumulated lambda error over the backward recursion), and tightening
+from 1e-12 to 1e-14 costs only ~1 extra iteration per solve, hence the
+1e-14 default. On m1d all three iterative presets agree with umfpack to
+machine precision (1e-15). ctest: `adjoint_solver_m1d` (umfpack vs
+ilu0/cpr/cprt) and `adjoint_solver_spe1` (cprt, rel tol 1e-5; suite now
+13 entries).
+
+trueimpes weights are not supported (they need forward-simulator
+internals); quasiimpes only. Serial only — MPI is the next milestone
+and requires this iterative path (UMFPACK is single-rank).
+
 ### Jutul status
 
 Setup struggled on Julia 1.12 (slow stack precompilation). Full setup

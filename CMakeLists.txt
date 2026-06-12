@@ -123,6 +123,10 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-endpoint-test.sh
               $<TARGET_FILE:flow_adjoint> ${_m1d}
               ${_testout}/fd_endpoint_swl)
+    add_test(NAME adjoint_solver_m1d
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-solver-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
+              ${_testout}/solver_m1d)
   endif()
   if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA)
     add_test(NAME adjoint_replay_spe1
@@ -133,6 +137,13 @@ if(HAVE_OPM_TESTS)
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-matchref-test.sh
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/matchref)
+    # SPE1 needs ~125 backward solves; iterative agreement vs umfpack is
+    # bounded by the accumulated lambda error (reduction 1e-14 -> ~1e-6).
+    add_test(NAME adjoint_solver_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-solver-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/solver_spe1
+              1e-5 cprt)
   endif()
 endif()
 # Match the opm build conventions (notably -UNDEBUG in Release when
