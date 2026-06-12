@@ -85,6 +85,52 @@ target_link_libraries(flow_adjoint
   PRIVATE
     moduleVersionAdjoint
 )
+
+# Look for the opm-tests repository; sets HAVE_OPM_TESTS / OPM_TESTS_ROOT.
+include(Findopm-tests)
+
+# Script-driven verification tests (see adjoint_testing.md). The FD
+# tests run many small forward simulations; all of them use the tiny
+# 3-cell MODEL_1D_DEBUG deck from opm-tests (branch with adjoint_tests/).
+if(HAVE_OPM_TESTS)
+  set(_m1d ${OPM_TESTS_ROOT}/adjoint_tests/MODEL_1D_DEBUG/inputfiles)
+  set(_testout ${PROJECT_BINARY_DIR}/script-tests)
+  if(EXISTS ${_m1d})
+    add_test(NAME adjoint_replay_m1d
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-replay-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${_m1d}/MODEL_1D_DEBUG.DATA ${_testout}/replay_m1d)
+    add_test(NAME adjoint_gradient_regression
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-gradient-regression.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d} ${_testout}/gradreg)
+    add_test(NAME adjoint_fd_pv
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
+              ${_testout}/fd_pv)
+    add_test(NAME adjoint_fd_trans
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-trans-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
+              ${_testout}/fd_trans)
+    add_test(NAME adjoint_fd_perm
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-perm-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
+              ${_testout}/fd_perm)
+    add_test(NAME adjoint_fd_wellctrl
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-ctrl-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_m1d} MODEL_1D_DEBUG
+              ${_testout}/fd_ctrl)
+  endif()
+  if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA)
+    add_test(NAME adjoint_replay_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-replay-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/replay_spe1)
+    add_test(NAME adjoint_matchref_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-matchref-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/matchref)
+  endif()
+endif()
 # Match the opm build conventions (notably -UNDEBUG in Release when
 # WITH_NDEBUG=OFF; an NDEBUG mismatch against the opm-simulators library
 # is an ABI break in classes with assertion-only members).

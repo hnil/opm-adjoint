@@ -508,6 +508,40 @@ Staging: **C.1** analytic pvmult/tmult assembler (unchanged Milestone C v1) → 
 FlexibleCellEvaluator with state-seeded T2p validation → **C.3** parameter-seeded modes
 (perm, end points) → **C.4** upstream type-generalization patches.
 
+### C.2 scoping update (after Milestone C completion, 2026-06-12)
+
+Code reading of `blackoilintensivequantities.hh` revises the
+FlexibleCellEvaluator plan — **most of it already exists**:
+
+- `BlackOilIntensiveQuantities::update(problem, priVars, globalSpaceIdx,
+  timeIdx)` (line ~760) is the ElementContext-free path used by the TPFA
+  assembly itself: public, decomposed into clean OPM_HOST_DEVICE steps
+  (updateSaturations / updateRelpermAndPressures / updateRsRvRsw /
+  updateMobilityAndInvB / updatePhaseDensities / updatePorosity), with
+  static_asserts that exclude solvent/polymer/etc. — exactly the v1
+  feature scope. Together with the public templated
+  computeStorage/computeFlux kernels this IS the "standalone fully
+  templated cell evaluation"; **no mini-IQ rewrite is needed**.
+- **T2p (state-seeded validation)** is therefore implementable today
+  with the live types: recompute IQ via the public update for both cells
+  of a face, evaluate storage+flux, compare values AND state derivatives
+  against the production linearization from the replay archive.
+- **Parameter passes, revised:**
+  - pvmult / tmult / perm:已 done analytically and FD-verified — the
+    evaluator is NOT needed for them.
+  - **End-point scaling (the remaining parameter class): cell-local
+    parameter FD** is the right v1 (as sketched in the original plan):
+    perturb the cell's scaled saturation end points in the
+    materialLawManager, recompute IQ(cell) + storage + the cell's face
+    fluxes through the public kernels, difference → dR/dθ columns,
+    contract with λ. Cost: O(2 × params/cell) cell-local evaluations per
+    substep — no global solves. Needs one more adjoint-hooks accessor
+    (mutate per-cell EclEpsScalingPoints in EclMaterialLawManager).
+  - **Exact parameter-AD** for end points would require the material-law
+    *parameter* objects to be templated on the evaluation type (they are
+    Scalar-based EclEpsScalingPoints today) — an upstream-sized change;
+    long-term C.4, not on the critical path.
+
 ### Extension architecture: inheritance / separate module vs in-tree edits
 
 Question: can the adjoint live mostly in derived classes (or a separate repo, like

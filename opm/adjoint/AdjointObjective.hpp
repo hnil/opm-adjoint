@@ -312,18 +312,19 @@ private:
     {
         const auto& schedule = simulator.vanguard().schedule();
         const auto& well = schedule.getWell(term.well, simulator.episodeIndex());
-        if (!well.isProducer()) {
-            OPM_THROW(std::runtime_error,
-                      "matchref objectives support producers only (v1)");
-        }
+        // Producers: W?PR keywords, internal rates negative.
+        // Injectors:  W?IR keywords, internal rates positive.
+        const bool producer = well.isProducer();
+        const Scalar sign = producer ? -1.0 : 1.0;
         std::string keyword;
         if (term.canonicalPhaseIdx == FluidSystem::oilPhaseIdx) {
-            keyword = "WOPR:" + term.well;
+            keyword = producer ? "WOPR:" : "WOIR:";
         } else if (term.canonicalPhaseIdx == FluidSystem::waterPhaseIdx) {
-            keyword = "WWPR:" + term.well;
+            keyword = producer ? "WWPR:" : "WWIR:";
         } else {
-            keyword = "WGPR:" + term.well;
+            keyword = producer ? "WGPR:" : "WGIR:";
         }
+        keyword += term.well;
 
         EclIO::ESmry summary(term.referenceCase);
         summary.loadData();
@@ -348,8 +349,7 @@ private:
         term.obsTimes.assign(time.begin(), time.end());
         term.obsValues.resize(rate.size());
         for (std::size_t i = 0; i < rate.size(); ++i) {
-            // internal convention: producer rates are negative
-            term.obsValues[i] = -static_cast<Scalar>(rate[i]) * toSi;
+            term.obsValues[i] = sign * static_cast<Scalar>(rate[i]) * toSi;
         }
         term.loaded = true;
     }
