@@ -87,11 +87,40 @@ pinned by the control equation — gradient legitimately zero; the
 scripts' optional `[orat]` argument rewrites the producer to ORAT
 control so the BHP is free.
 
-Still open in Milestone B: rate-matching objectives vs a reference
-summary (ESmry; needs the rate <-> well-primary-variable mapping),
-lambda_w output for later dJ/du, cross-validation vs JutulDarcy (T6),
-parts of [#6751](https://github.com/OPM/opm-simulators/pull/6751)
-(full-system path) and [#7039](https://github.com/OPM/opm-simulators/pull/7039)
+### Rate and rate-matching objectives — FD-verified
+
+The adjoint-hooks branch gained a second accessor
+(`StandardWellEval::primaryVariables()`), giving the rate <->
+primary-variable derivatives via `getQs()` (well-variable slots at
+`numEq + j`). New objectives:
+- `rate:<WELL>:<oil|water|gas>` — J = Σ dt q (cumulative volume; e.g.
+  d(cumulative oil)/d(poro, trans));
+- `match:<WELL>:<phase>:<target sm3/day>` — J = Σ dt (q − q_t)², **the
+  quadratic well-curve-matching form** (constant target; observed
+  curves via ESmry are pure I/O on top of this verified machinery).
+
+| T5 combination (MODEL_1D_DEBUG, BHP-controlled producer) | rel. errors |
+|---|---|
+| rate:Prod:oil × PV | 1.0e-8 / 1.2e-8 / 6.5e-8 |
+| rate:Prod:oil × trans | 8.8e-9 / 1.0e-8 |
+| match:Prod:oil:10 × PV | 6.5e-9 / 7.7e-9 / 2.4e-8 |
+
+(Control-mode gotcha mirrored: a rate objective needs the rate FREE —
+i.e. a BHP-controlled well; the bhp objective needs ORAT control.)
+
+**T0.7 update:** verified on a DRSDT variant of SPE1CASE1
+(`DRSDT 0.001 ALL` in SCHEDULE): cache vs no-cache **bitwise identical**
+— confirming the plan's analysis that the non-recycle branch evaluates
+the identical storage expression. The spe02 radial decks and model6
+(2-phase) cannot run in the 3-phase blackoil TypeTag binaries
+(pre-existing limitation).
+
+Still open in Milestone B: observed curves from a reference summary via
+ESmry (pure I/O now), lambda_w output for later dJ/du, cross-validation
+vs JutulDarcy (T6 — julia is installed via juliaup, JutulDarcy package
+setup pending), parts of
+[#6751](https://github.com/OPM/opm-simulators/pull/6751) (full-system
+path) and [#7039](https://github.com/OPM/opm-simulators/pull/7039)
 (exact forward replay) onto the adjoint-hooks branch when needed.
 
 ```bash
