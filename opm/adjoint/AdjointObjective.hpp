@@ -43,11 +43,16 @@
 
 #include <opm/common/ErrorMacros.hpp>
 
+#include <opm/io/eclipse/ESmry.hpp>
+
 #include <opm/models/utils/propertysystem.hh>
 
+#include <algorithm>
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace Opm {
 
@@ -60,7 +65,8 @@ public:
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
 
-    enum class Kind { PressureAverage, WellBhp, WellRate, WellRateMatch };
+    enum class Kind { PressureAverage, WellBhp, WellRate, WellRateMatch,
+                      WellRateMatchRef };
 
     //! \param spec objective specification string (--adjoint-objective).
     explicit AdjointObjectiveFunction(const std::string& spec)
@@ -104,11 +110,29 @@ public:
             parsePhase_(rest.substr(c1 + 1, c2 - c1 - 1));
             // surface rates are SI (m3/s) internally
             targetRate_ = std::stod(rest.substr(c2 + 1)) / 86400.0;
+        } else if (spec.rfind("matchref:", 0) == 0) {
+            // matchref:<WELL>:<phase>:<reference case> --
+            // J = sum_k dt_k (q(t_k) - q_obs(t_k))^2 with the observed
+            // curve read from the reference run's summary (ESmry) and
+            // interpolated linearly in time. Producers only in v1.
+            kind_ = Kind::WellRateMatchRef;
+            const auto rest = spec.substr(9);
+            const auto c1 = rest.find(':');
+            const auto c2 = (c1 == std::string::npos)
+                ? std::string::npos : rest.find(':', c1 + 1);
+            if (c2 == std::string::npos) {
+                OPM_THROW(std::runtime_error,
+                          "--adjoint-objective=matchref:<WELL>:<phase>:<refcase>");
+            }
+            wellName_ = rest.substr(0, c1);
+            parsePhase_(rest.substr(c1 + 1, c2 - c1 - 1));
+            referenceCase_ = rest.substr(c2 + 1);
         } else {
             OPM_THROW(std::runtime_error,
                       "Unknown adjoint objective '" + spec +
                       "' (expected 'pressure-average', 'bhp:<WELL>', "
-                      "'rate:<WELL>:<phase>' or 'match:<WELL>:<phase>:<target>')");
+                      "'rate:<WELL>:<phase>', 'match:<WELL>:<phase>:<target>' "
+                      "or 'matchref:<WELL>:<phase>:<refcase>')");
         }
     }
 
@@ -156,6 +180,17 @@ public:
                 wellState.well(wellName_).surface_rates[phasePos] - targetRate_;
             return dt * diff * diff;
         }
+        case Kind::WellRateMatchRef: {
+            const auto& wellState =
+                simulator.problem().wellModel().wellState();
+            const int phasePos =
+                FluidSystem::canonicalToActivePhaseIdx(canonicalPhaseIdx_);
+            const Scalar tEnd = simulator.time() + dt;
+            const Scalar diff =
+                wellState.well(wellName_).surface_rates[phasePos] -
+                observedRate(simulator, tEnd);
+            return dt * diff * diff;
+        }
         }
         return 0.0;
     }
@@ -188,9 +223,10 @@ public:
     }
 
     //! \brief dJ_k/d(rate) weight: dt for the plain rate objective,
-    //!        2 dt (q - q_target) for the quadratic match (q = current
-    //!        rate of the selected phase, supplied by the caller).
-    Scalar rateWeight(const std::string& well, double dt, Scalar q) const
+    //!        2 dt (q - q_target/q_obs(tEnd)) for the quadratic matches
+    //!        (q = current rate of the selected phase).
+    Scalar rateWeight(const Simulator& simulator, const std::string& well,
+                      double dt, Scalar q) const
     {
         if (well != wellName_) {
             return 0.0;
@@ -201,7 +237,35 @@ public:
         if (kind_ == Kind::WellRateMatch) {
             return 2.0 * dt * (q - targetRate_);
         }
+        if (kind_ == Kind::WellRateMatchRef) {
+            const Scalar tEnd = simulator.time() + dt;
+            return 2.0 * dt * (q - observedRate(simulator, tEnd));
+        }
         return 0.0;
+    }
+
+    //! \brief Observed rate (internal sign and units) at time \p t [s],
+    //!        interpolated linearly from the reference summary.
+    Scalar observedRate(const Simulator& simulator, Scalar t) const
+    {
+        if (!observationsLoaded_) {
+            loadObservations_(simulator);
+        }
+        const Scalar tDays = t / 86400.0;
+        const auto& times = obsTimes_;
+        if (times.empty()) {
+            OPM_THROW(std::runtime_error, "Empty observed curve");
+        }
+        if (tDays <= times.front()) {
+            return obsValues_.front();
+        }
+        if (tDays >= times.back()) {
+            return obsValues_.back();
+        }
+        const auto it = std::upper_bound(times.begin(), times.end(), tDays);
+        const std::size_t hi = it - times.begin();
+        const Scalar w = (tDays - times[hi - 1]) / (times[hi] - times[hi - 1]);
+        return (1.0 - w) * obsValues_[hi - 1] + w * obsValues_[hi];
     }
 
     //! \brief Active component index of the objective's rate phase.
@@ -226,11 +290,61 @@ private:
         }
     }
 
+    void loadObservations_(const Simulator& simulator) const
+    {
+        const auto& schedule = simulator.vanguard().schedule();
+        const auto& well = schedule.getWell(wellName_, simulator.episodeIndex());
+        if (!well.isProducer()) {
+            OPM_THROW(std::runtime_error,
+                      "matchref objectives support producers only (v1)");
+        }
+        std::string keyword;
+        if (canonicalPhaseIdx_ == FluidSystem::oilPhaseIdx) {
+            keyword = "WOPR:" + wellName_;
+        } else if (canonicalPhaseIdx_ == FluidSystem::waterPhaseIdx) {
+            keyword = "WWPR:" + wellName_;
+        } else {
+            keyword = "WGPR:" + wellName_;
+        }
+
+        EclIO::ESmry summary(referenceCase_);
+        summary.loadData();
+        const auto& time = summary.get("TIME");      // days
+        const auto& rate = summary.get(keyword);     // in file units, positive
+
+        // Convert the file's rate unit to internal SI (m3/s).
+        const std::string unit = summary.get_unit(keyword);
+        Scalar toSi;
+        if (unit == "SM3/DAY") {
+            toSi = 1.0 / 86400.0;
+        } else if (unit == "MSCF/DAY") {
+            toSi = 28.316846592 / 86400.0;   // 1 Mscf = 1000 ft^3
+        } else if (unit == "STB/DAY") {
+            toSi = 0.158987294928 / 86400.0;
+        } else {
+            OPM_THROW(std::runtime_error,
+                      "Unsupported rate unit '" + unit +
+                      "' in reference summary for " + keyword);
+        }
+
+        obsTimes_.assign(time.begin(), time.end());
+        obsValues_.resize(rate.size());
+        for (std::size_t i = 0; i < rate.size(); ++i) {
+            // internal convention: producer rates are negative
+            obsValues_[i] = -static_cast<Scalar>(rate[i]) * toSi;
+        }
+        observationsLoaded_ = true;
+    }
+
     Kind kind_{Kind::PressureAverage};
     std::string wellName_{};
     unsigned canonicalPhaseIdx_{0};
     unsigned canonicalCompIdx_{0};
     Scalar targetRate_{0.0};
+    std::string referenceCase_{};
+    mutable bool observationsLoaded_{false};
+    mutable std::vector<Scalar> obsTimes_;
+    mutable std::vector<Scalar> obsValues_;
 };
 
 } // namespace Opm

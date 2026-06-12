@@ -192,7 +192,8 @@ private:
         using Kind = typename AdjointObjectiveFunction<TypeTag>::Kind;
         if (objective_.kind() != Kind::WellBhp &&
             objective_.kind() != Kind::WellRate &&
-            objective_.kind() != Kind::WellRateMatch) {
+            objective_.kind() != Kind::WellRateMatch &&
+            objective_.kind() != Kind::WellRateMatchRef) {
             return;
         }
         const auto& wellModel = simulator_.problem().wellModel();
@@ -223,7 +224,8 @@ private:
                 const auto qs =
                     stdWell->primaryVariables().getQs(objective_.activeCompIdx());
                 const Scalar weight =
-                    objective_.rateWeight(wellPtr->name(), dt, qs.value());
+                    objective_.rateWeight(simulator_, wellPtr->name(), dt,
+                                          qs.value());
                 for (std::size_t j = 0; j < numWellEq; ++j) {
                     dJdxw[j] = weight * qs.derivative(numEq + j);
                 }
