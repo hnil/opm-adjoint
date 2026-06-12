@@ -29,6 +29,7 @@
 #ifndef OPM_TRANSPOSE_MATRIX_HPP
 #define OPM_TRANSPOSE_MATRIX_HPP
 
+#include <dune/common/fmatrix.hh>
 #include <dune/istl/bcrsmatrix.hh>
 #include <dune/istl/matrixindexset.hh>
 
@@ -52,13 +53,22 @@ Block transposeBlock(const Block& block)
     return transposed;
 }
 
+//! \brief Result type of transposeBlockMatrix: always plain FieldMatrix
+//!        blocks, so direct solvers (Dune::UMFPack) accept it regardless
+//!        of the source block type (e.g. Opm::MatrixBlock).
+template<class Matrix>
+using TransposedMatrix = Dune::BCRSMatrix<
+    Dune::FieldMatrix<typename Matrix::field_type,
+                      static_cast<int>(Matrix::block_type::cols),
+                      static_cast<int>(Matrix::block_type::rows)>>;
+
 //! \brief Build the transpose of a BCRS matrix with square dense blocks.
 //!
 //! The returned matrix has the transposed sparsity pattern and each block
 //! is the transpose of the corresponding source block:
 //! (A^T)_{ji} = (A_{ij})^T.
 template<class Matrix>
-Matrix transposeBlockMatrix(const Matrix& matrix)
+TransposedMatrix<Matrix> transposeBlockMatrix(const Matrix& matrix)
 {
     Dune::MatrixIndexSet indices(matrix.M(), matrix.N());
     for (auto row = matrix.begin(); row != matrix.end(); ++row) {
@@ -67,12 +77,18 @@ Matrix transposeBlockMatrix(const Matrix& matrix)
         }
     }
 
-    Matrix transposed;
+    TransposedMatrix<Matrix> transposed;
     indices.exportIdx(transposed);
 
     for (auto row = matrix.begin(); row != matrix.end(); ++row) {
         for (auto entry = row->begin(); entry != row->end(); ++entry) {
-            transposed[entry.index()][row.index()] = transposeBlock(*entry);
+            auto& target = transposed[entry.index()][row.index()];
+            const auto& source = *entry;
+            for (std::size_t i = 0; i < Matrix::block_type::cols; ++i) {
+                for (std::size_t j = 0; j < Matrix::block_type::rows; ++j) {
+                    target[i][j] = source[j][i];
+                }
+            }
         }
     }
     return transposed;

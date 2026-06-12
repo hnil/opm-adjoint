@@ -46,6 +46,10 @@
 #include <opm/adjoint/AdjointStorage.hpp>
 #include <opm/adjoint/AdjointSystemIO.hpp>
 
+#include <dune/common/fmatrix.hh>
+
+#include <vector>
+
 #include <fmt/format.h>
 
 #include <memory>
@@ -60,6 +64,13 @@ class AdjointReplay
 public:
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
     using SolutionVector = GetPropType<TypeTag, Properties::SolutionVector>;
+    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
+    using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
+    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
+
+    static constexpr int numEq = getPropValue<TypeTag, Properties::NumEq>();
+    //! Dense block of dR_k/dx_{k-1} for one cell (block-diagonal cross term).
+    using BdiagBlock = Dune::FieldMatrix<Scalar, numEq, numEq>;
 
     explicit AdjointReplay(Simulator& simulator)
         : simulator_(simulator)
@@ -182,8 +193,15 @@ public:
         problem_().markTimestepInitialized();
         problem_().advanceIteration();
 
-        // [Milestone B hook: compute Bdiag_k = -(V/dt) dStorage/dx|x_{k-1}
-        //  from the intensive quantities at time index 1 here.]
+        // Milestone B cross term: at this point solution(0) = x_{k-1} and
+        // the intensive quantities at time index 0 carry derivatives with
+        // respect to x_{k-1}, so the block-diagonal
+        // Bdiag_k = dR_k/dx_{k-1} = -(V/dt) dStorage/dx|x_{k-1}
+        // is a cell-local evaluation (fluxes and sources are purely
+        // implicit in the TPFA residual).
+        if (computeBdiagEnabled_) {
+            captureBdiag_(meta.dt);
+        }
 
         // Install the converged state of substep k.
         model_().solution(/*timeIdx=*/0) = convergedSolution;
@@ -203,6 +221,22 @@ public:
     const AdjointMeta& meta() const
     { return meta_; }
 
+    //! \brief Enable capturing of the cross-term blocks during replay.
+    void setComputeBdiag(bool enable)
+    { computeBdiagEnabled_ = enable; }
+
+    //! \brief Cross-term blocks dR_k/dx_{k-1} of the last replayed substep.
+    const std::vector<BdiagBlock>& bdiag() const
+    { return bdiag_; }
+
+    //! \brief Full restore of snapshot \p k (k == -1 means the initial
+    //!        state). Public for objective-only evaluation.
+    void loadSnapshot(int k, int reportStepForWells)
+    { loadSnapshot_(k, reportStepForWells); }
+
+    Simulator& simulator()
+    { return simulator_; }
+
 private:
     auto& model_()
     { return simulator_.model(); }
@@ -221,6 +255,23 @@ private:
                                           : AdjointGroups::substep(k);
         archive_->read(simulator_, group, "simulator");
         model_().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+    }
+
+    void captureBdiag_(double dt)
+    {
+        const std::size_t numCells = model_().numGridDof();
+        bdiag_.resize(numCells);
+        for (std::size_t globI = 0; globI < numCells; ++globI) {
+            const auto& intQuants = model_().intensiveQuantities(globI, /*timeIdx=*/0);
+            Dune::FieldVector<Evaluation, numEq> storage;
+            LocalResidual::template computeStorage<Evaluation>(storage, intQuants);
+            const Scalar factor = -model_().dofTotalVolume(globI) / dt;
+            for (int eq = 0; eq < numEq; ++eq) {
+                for (int pv = 0; pv < numEq; ++pv) {
+                    bdiag_[globI][eq][pv] = factor * storage[eq].derivative(pv);
+                }
+            }
+        }
     }
 
     bool compareWithStored_(int k, double& worstResidual, double& worstJacobian)
@@ -278,6 +329,8 @@ private:
     AdjointConfig config_;
     std::unique_ptr<AdjointArchive> archive_;
     AdjointMeta meta_;
+    bool computeBdiagEnabled_{false};
+    std::vector<BdiagBlock> bdiag_;
 };
 
 } // namespace Opm

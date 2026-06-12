@@ -48,6 +48,7 @@
 
 #include <opm/adjoint/AdjointFlowProblem.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
+#include <opm/adjoint/AdjointSolver.hpp>
 
 #include <cstring>
 #include <memory>
@@ -111,7 +112,7 @@ public:
     }
 
     template<class TypeTag>
-    int runReplay()
+    int runReplay(const std::string& mode)
     {
         int exitCode = EXIT_SUCCESS;
         if (initialize_<TypeTag>(exitCode)) {
@@ -119,11 +120,18 @@ public:
             FlowMain<TypeTag> flowMain(argc_, argv_, outputCout_, outputFiles_);
             // Full production setup without running the time loop.
             const int status = flowMain.executeInitStep();
-            if (status == EXIT_SUCCESS) {
+            if (status != EXIT_SUCCESS) {
+                return status;
+            }
+            if (mode == "replay") {
                 AdjointReplay<TypeTag> replay(*flowMain.getSimulatorPtr());
                 exitCode = replay.run();
-            } else {
-                exitCode = status;
+            } else if (mode == "gradient") {
+                AdjointSolver<TypeTag> solver(*flowMain.getSimulatorPtr());
+                exitCode = solver.run();
+            } else { // "objective"
+                AdjointSolver<TypeTag> solver(*flowMain.getSimulatorPtr());
+                exitCode = solver.evaluateObjectiveOnly();
             }
         }
         return exitCode;
@@ -138,16 +146,16 @@ int main(int argc, char** argv)
 
     // The run mode must be known before the parameter system is set up,
     // so peek at the raw command line.
-    bool replay = false;
+    std::string mode;
     for (int i = 1; i < argc; ++i) {
-        if (std::strncmp(argv[i], "--adjoint-mode=replay", 21) == 0) {
-            replay = true;
+        if (std::strncmp(argv[i], "--adjoint-mode=", 15) == 0) {
+            mode = argv[i] + 15;
         }
     }
 
     auto mainObject = std::make_unique<Opm::AdjointMain>(argc, argv);
-    const int exitCode = replay ? mainObject->runReplay<TypeTag>()
-                                : mainObject->runForward<TypeTag>();
+    const int exitCode = mode.empty() ? mainObject->runForward<TypeTag>()
+                                      : mainObject->runReplay<TypeTag>(mode);
     // Destruct mainObject as the destructor calls MPI_Finalize!
     mainObject.reset();
     return exitCode;

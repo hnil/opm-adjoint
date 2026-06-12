@@ -64,7 +64,7 @@ public:
         solution.resize(rhs.size());
         solution = 0.0;
 
-        Dune::UMFPack<Matrix> solver(transposed, /*verbose=*/0);
+        Dune::UMFPack<TransposedMatrix<Matrix>> solver(transposed, /*verbose=*/0);
         Dune::InverseOperatorResult result;
         solver.apply(solution, rhs, result);
 
