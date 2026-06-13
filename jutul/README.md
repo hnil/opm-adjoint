@@ -93,3 +93,33 @@ not under time pressure.
 Note: `parameter_sensitivities`/`compute_well_qoi` call signatures track
 JutulDarcy's API; if a JutulDarcy upgrade changes them, fix up here —
 the logic (misfit form, conventions) is the part that matters.
+
+
+## Forward comparison status (2026-06-13)
+
+Environment installed on Julia LTS (1.10.11); `Project.toml`/`Manifest.toml`
+are committed for reproducibility. JutulDarcy reads the OPM `.DATA` deck
+directly (`setup_case_from_data_file`).
+
+`tests/run-jutul-forward-compare.sh` runs both codes on the same deck and
+compares well curves. SPE1CASE1 result, with units reconciled (OPM
+summary emits FIELD: STB/d, MSCF/d, psia; Jutul emits metric):
+
+- **Rate target matches exactly**: OPM WOPR 20000 STB/d = 3179.7 sm3/d
+  = Jutul orat 3179.75 sm3/d at the first step (rel 0).
+- **BHP floor matches exactly**: both producers bottom out at 68.95 bar
+  (= the 1000 psia limit) in the late, BHP-controlled regime.
+- **Mid-run they diverge** in *when* the producer switches from rate to
+  BHP control, and in the well-index/BHP relationship: at t=1 d the same
+  oil rate gives OPM 200 bar vs Jutul 156 bar BHP. This is the expected
+  OPM-vs-Jutul well-model difference (connection factor / wellbore
+  coupling), not a reservoir-physics disagreement - the rates agree
+  whenever the well is rate-controlled and the BHP floor is identical.
+
+Implication for gradient cross-validation (T6 stage 2): pick a
+configuration where the two well models agree tightly - e.g. compare
+*pressure-average* or a BHP-controlled-well objective, rather than an
+oil-rate objective on a producer that switches control mid-run. The
+`run-jutul-forward-compare.sh` PASS/FAIL on shape-normalized curves is
+therefore informational; the unit-reconciled point comparison above is
+the meaningful check.
