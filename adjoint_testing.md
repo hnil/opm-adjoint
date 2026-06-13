@@ -298,6 +298,42 @@ mpirun -np 4 flow_adjoint CASE.DATA --enable-storage-cache=false \
     --enable-adaptive-time-stepping=false --adjoint-mode=gradient
 ```
 
+### Larger grids: SPE9 (9000 cells) — replay bitwise, gradient + timing
+
+SPE9_CP_SHORT (24x25x15 = 9000 active cells, DISGAS, multi-perforation
+wells) replays **bitwise exact** (21/21 substeps, residual and Jacobian
+rel diff 0.0). Multi-perforation wells need
+`--matrix-add-well-contributions=true` (plus an explicit
+`--linear-solver=ilu0`/`cpr`, since that flag flips the forward default
+to the unregistered `cprw`): the Schur step writes C^T D^-1 B into the
+reservoir matrix, coupling every pair of cells a well perforates, and
+those entries only exist in the sparsity when that option is set.
+Without it the adjoint now fails up front with an actionable message
+instead of segfaulting.
+
+```bash
+S="--enable-storage-cache=false --enable-adaptive-time-stepping=false \
+   --matrix-add-well-contributions=true --linear-solver=ilu0 --adjoint-file=a"
+flow_adjoint SPE9_CP_SHORT.DATA $S --adjoint-save=true
+flow_adjoint SPE9_CP_SHORT.DATA $S --adjoint-mode=gradient --adjoint-linear-solver=cprt
+```
+
+**Per-phase timing** (new, logged at the end of every gradient run -
+guides where to optimize). SPE9, 21 substeps, ~1.0 s total:
+
+| phase | share |
+|---|---|
+| transposed solve | 56% |
+| replay (re-linearize) | 41% |
+| gradient accumulation (pv/trans/well) | 3% |
+| Schur (addWellContributions) | 0.1% |
+
+So on a real deck the cost is dominated by the **linear solve** and the
+**re-linearization**, in that order; gradient assembly and the Schur
+step are negligible. Optimization effort (faster transposed solve /
+preconditioner reuse, and avoiding the full re-linearize per substep) is
+where the time is - not in the gradient kernels.
+
 ### Jutul status
 
 Setup struggled on Julia 1.12 (slow stack precompilation). Full setup

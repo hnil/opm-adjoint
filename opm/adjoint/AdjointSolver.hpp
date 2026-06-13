@@ -61,6 +61,7 @@
 #include <fmt/format.h>
 
 #include <array>
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <string>
@@ -178,11 +179,25 @@ public:
         Scalar objectiveValue = 0.0;
         int replayFailures = 0;
 
+        using Clock = std::chrono::steady_clock;
+        auto tick = [] { return Clock::now(); };
+        auto secs = [](Clock::time_point a, Clock::time_point b) {
+            return std::chrono::duration<double>(b - a).count();
+        };
+        const auto sweepStart = tick();
+
         for (int k = numSubsteps - 1; k >= 0; --k) {
             double worstResidual = 0.0;
             double worstJacobian = 0.0;
+            auto t0 = tick();
             if (!replay_.replayStep(k, worstResidual, worstJacobian)) {
                 ++replayFailures;
+            }
+            timing_.replay += secs(t0, tick());
+            // The well container is rebuilt by replayStep; check the Schur
+            // sparsity requirement once, now that the wells exist.
+            if (k == numSubsteps - 1) {
+                checkWellContributionSparsity_();
             }
             const auto& step = meta.substeps[k];
 
@@ -209,23 +224,32 @@ public:
             // Schur-reduced matrix: A -= C^T D^-1 B (in place on the
             // linearizer's matrix; it is re-assembled in the next
             // replayStep anyway).
+            t0 = tick();
             auto& jacobian = model.linearizer().jacobian();
             simulator_.problem().wellModel().addWellContributions(jacobian);
+            timing_.schur += secs(t0, tick());
 
             // Solve A_red^T lambda_k = rhs.
+            t0 = tick();
             linearSolver_.solveTransposed(jacobian.istlMatrix(), rhs, lambda);
             // lambda is owner-correct after the solve; make it consistent
             // on ghost cells so the flux/Bdiag cross terms (which read a
             // neighbor's lambda, possibly a ghost) are correct.
             parallel_.makeConsistent(lambda);
+            timing_.solve += secs(t0, tick());
 
+            t0 = tick();
             computeWellAdjoints_(k, step.dt, lambda);
             accumulateGradients_(step.dt, lambda);
+            timing_.gradients += secs(t0, tick());
+            t0 = tick();
             accumulateEndpointGradients_(step.dt, lambda);
+            timing_.endpoints += secs(t0, tick());
 
             bdiagPrev = replay_.bdiag();
             lambdaPrev = lambda;
         }
+        timing_.total = secs(sweepStart, tick());
 
         OpmLog::info(fmt::format(
             "Adjoint sweep finished: J = {:.16e}, {} substeps, {} replay "
@@ -238,12 +262,80 @@ public:
                 double(linearSolver_.totalIterations()) /
                     std::max(1, linearSolver_.numSolves())));
         }
+        reportTiming_(numSubsteps);
 
         writeResults_(objectiveValue);
         return replayFailures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
 private:
+    //! \brief Per-phase wall-clock breakdown of the backward sweep, to
+    //!        guide where optimization effort is worthwhile.
+    struct Timing
+    {
+        double replay = 0.0;     //!< re-linearization at the converged point
+        double schur = 0.0;      //!< A -= C^T D^-1 B (addWellContributions)
+        double solve = 0.0;      //!< transposed linear solve (+ consistency)
+        double gradients = 0.0;  //!< well adjoints + PV/trans accumulation
+        double endpoints = 0.0;  //!< end-point FD (0 unless --adjoint-endpoints)
+        double total = 0.0;      //!< whole sweep
+    };
+
+    //! \brief The Schur step (addWellContributions) writes C^T D^-1 B
+    //!        into the reservoir matrix, which couples every pair of cells
+    //!        a well perforates. Those entries only exist in the matrix
+    //!        sparsity when the run was set up with
+    //!        --matrix-add-well-contributions=true. Without it, a well
+    //!        with >1 perforation writes out of bounds (segfault), so we
+    //!        check up front and fail with an actionable message.
+    void checkWellContributionSparsity_()
+    {
+        if (Parameters::Get<Parameters::MatrixAddWellContributions>()) {
+            return;
+        }
+        std::size_t maxPerf = 0;
+        for (const auto& wellPtr :
+             simulator_.problem().wellModel().localNonshutWells()) {
+            maxPerf = std::max(maxPerf, wellPtr->cells().size());
+        }
+        maxPerf = parallel_.parallel()
+                      ? static_cast<std::size_t>(parallel_.max(double(maxPerf)))
+                      : maxPerf;
+        if (maxPerf > 1) {
+            OPM_THROW(std::runtime_error,
+                      "Adjoint gradient runs with multi-perforation wells "
+                      "require --matrix-add-well-contributions=true so the "
+                      "Jacobian carries the well-coupling sparsity used by "
+                      "the Schur complement. Re-run with that option (and "
+                      "an explicit --linear-solver=ilu0/cpr, since it "
+                      "changes the forward default).");
+        }
+    }
+
+    void reportTiming_(int numSubsteps)
+    {
+        const double t = timing_.total > 0.0 ? timing_.total : 1.0;
+        const double accounted = timing_.replay + timing_.schur +
+                                 timing_.solve + timing_.gradients +
+                                 timing_.endpoints;
+        auto pct = [t](double x) { return 100.0 * x / t; };
+        OpmLog::info(fmt::format(
+            "Adjoint sweep timing ({} substeps, {:.2f} s total):\n"
+            "  replay (re-linearize)   {:8.3f} s  ({:5.1f}%)\n"
+            "  schur  (well contrib.)  {:8.3f} s  ({:5.1f}%)\n"
+            "  solve  (transposed)     {:8.3f} s  ({:5.1f}%)\n"
+            "  gradients (pv/trans/w)  {:8.3f} s  ({:5.1f}%)\n"
+            "  endpoints (FD)          {:8.3f} s  ({:5.1f}%)\n"
+            "  other                   {:8.3f} s  ({:5.1f}%)",
+            numSubsteps, timing_.total,
+            timing_.replay, pct(timing_.replay),
+            timing_.schur, pct(timing_.schur),
+            timing_.solve, pct(timing_.solve),
+            timing_.gradients, pct(timing_.gradients),
+            timing_.endpoints, pct(timing_.endpoints),
+            timing_.total - accounted, pct(timing_.total - accounted)));
+    }
+
     //! \brief dJ_k/dx_w of the objective for one StandardWell
     //!        (empty vector if the well is not involved).
     Dune::DynamicVector<Scalar>
@@ -752,6 +844,7 @@ private:
     std::map<std::string, Dune::DynamicVector<Scalar>> lambdaWells_;
     std::vector<const EndpointParamDef<Scalar>*> endpointDefs_;
     std::vector<std::vector<Scalar>> gradientEndpoints_;
+    Timing timing_;
 };
 
 } // namespace Opm
