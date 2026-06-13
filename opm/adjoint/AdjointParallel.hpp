@@ -22,19 +22,19 @@
  *        communication object for the transposed solves, and gathering
  *        of cell fields for rank-0 output.
  *
- * Parallel correctness of the transposed solve rests on two properties
- * of the flow setup:
- *  - the TPFA linearizer assembles overlap (ghost) rows locally from
- *    synchronized states, so the entry (A^T)_{ij} = A_{ji} of an
- *    interior row i is available locally for every neighbor j (overlap
- *    width 1 suffices for the face term a_{ji}, which both ranks
- *    compute from the same data);
- *  - wells are never split across ranks, so the Schur complement
- *    entries C^T D^-1 B only couple interior cells of the owning rank
- *    and never appear in ghost rows.
- * The local transpose therefore has correct interior rows, and the
- * ghost-last operator (interior rows only + copyOwnerToAll) gives the
- * right global action.
+ * Parallel correctness note: a plain local transpose is NOT enough. The
+ * forward simulation assembles complete ROWS for interior cells, but the
+ * transposed system needs complete COLUMNS, and the local matrix's
+ * overlap rows do not carry the off-diagonal entries that complete an
+ * interior column - so the cross-rank coupling A_{ki} (k interior on
+ * another rank) is missing. This was verified empirically: the local
+ * transpose gives wrong gradients for np>=3. The exact transposed
+ * operator (see TransposedParallelOperator in AdjointLinearSolver.hpp)
+ * fixes this by scattering A^T over the forward matrix's complete
+ * interior rows and communicating the overlap contributions back to
+ * their owners. Wells are never split across ranks, so the well Schur
+ * complement only couples interior cells of one rank and needs no
+ * special treatment.
  */
 #ifndef OPM_ADJOINT_PARALLEL_HPP
 #define OPM_ADJOINT_PARALLEL_HPP

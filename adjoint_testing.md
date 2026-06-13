@@ -240,46 +240,62 @@ trueimpes weights are not supported (they need forward-simulator
 internals); quasiimpes only. Serial only — MPI is the next milestone
 and requires this iterative path (UMFPACK is single-rank).
 
-### MPI / parallel adjoint — np=2 verified against serial
+### MPI / parallel adjoint — np up to 4 verified against serial
 
 Recording, replay and the transposed solve are all parallel. Each rank
 stores and reads back its own partition: the HDF5 archive uses
 PROCESS_SPLIT (one dataset per rank, the same mechanism as flow's
-save/load-step), and the directory store gets a per-rank sub-directory.
-The transposed solve runs on the parallel ghost-last operator
-(interior rows + copyOwnerToAll); lambda is made consistent on ghost
-cells after each solve so the flux / Bdiag cross terms that read a
-neighbor's lambda are correct. Per-cell and per-face gradients are
-gathered onto rank 0 (sorted by cartesian id) for output; serial output
-is byte-identical to the pre-MPI behavior (the gather is the identity in
-serial), so the existing references and regression test are unchanged.
+save/load-step) and the directory store gets a per-rank sub-directory.
+
+**The transpose is the subtle part.** The forward simulation assembles
+complete *rows* for interior cells, but the adjoint system needs
+complete *columns* - and a plain local transpose drops the cross-rank
+coupling `A_{ki}` where `k` is interior on another rank (the local
+matrix's overlap rows do not carry it). This is a real bug, not
+theoretical: with a plain local transpose the gradients are correct for
+np=2 (a clean split) but **wrong for np>=3** (PV off by ~10%, and with
+the cross-rank term disabled entirely the np=3 PV gradient is off by
+120%). The fix (`TransposedParallelOperator`) applies the exact
+transposed action: it scatters `A^T` over the forward matrix's complete
+interior rows, writing partial sums into both interior and overlap
+entries, then accumulates the overlap contributions back onto their
+owners with `addOwnerCopyToOwnerCopy` - i.e. it communicates the missing
+column part. The (incomplete) local transpose is kept only as the
+preconditioner matrix (opm's parallel ILU0); the solver is BiCGSTAB.
+lambda is made consistent (copyOwnerToAll) after each solve so the
+flux/Bdiag cross terms that read a neighbor's lambda are correct.
+Per-cell and per-face gradients are gathered onto rank 0 (sorted by
+cartesian id); serial output is byte-identical to the pre-MPI behavior
+(the gather is the identity in serial).
 
 ```bash
 tests/run-adjoint-mpi-test.sh <flow_adjoint> <deck.DATA> <outdir> [nprocs] [rel-tol]
 ```
 
 Compares the np=1 and np=N PV gradient as a sorted value multiset
-(ordering-agnostic, since the partitioned grid reorders cells). SPE1,
-np=2: **5.9e-6** vs serial. ctest `adjoint_mpi_spe1` (auto-skips when no
+(ordering-agnostic, since the partitioned grid reorders cells).
+**--enable-adaptive-time-stepping=false is required**: otherwise the
+parallel forward run can take a different substep sequence than serial
+(parallel linear solves converge slightly differently -> different
+chopping), which changes the trajectory and makes the gradients
+legitimately differ - this masquerades as an adjoint error. Under fixed
+stepping, SPE1 PV gradients match serial to **1e-5 (np=2), 6e-6 (np=3),
+9e-6 (np=4)**; the transmissibility gradient matches to 4.5e-8
+normalized by max|g| (its sorted relative diff looks larger only because
+of near-zero faces). ctest `adjoint_mpi_spe1` (np=2, auto-skips when no
 MPI launcher is found).
 
-**Linear solver in parallel — a cprt finding.** ilu0 and cpr are
-correct in parallel (both 5.5e-6 vs serial on SPE1); **cprt falsely
-converges in parallel** — it reports convergence in ~7 iterations (like
-serial) but the lambda is ~60x too small, so the gradient is wrong. The
-transposed CPR pressure transfer has evidently not been exercised in a
-parallel setting (the "cprt unexercised for years" risk, now pinned to
-parallel). cprt is rejected at runtime in parallel with a message
-pointing to cpr/ilu0; it remains the fastest correct choice in serial.
-So: **serial → cprt, parallel → cpr (or ilu0)**. UMFPACK stays
-single-rank (also rejected in parallel).
-
-Run any parallel adjoint manually with e.g.:
+**Linear solver in parallel.** The operator is exact, so the
+preconditioner only affects convergence rate; parallel uses opm's
+parallel ILU0 (block-Jacobi over ranks) regardless of the requested
+`--adjoint-linear-solver` (which then only sets tol/maxiter). UMFPACK is
+single-rank and falls back to ilu0 in parallel. In serial, cprt remains
+the fastest correct choice. Run a parallel adjoint manually with e.g.:
 ```bash
 mpirun -np 4 flow_adjoint CASE.DATA --enable-storage-cache=false \
-    --adjoint-save=true
+    --enable-adaptive-time-stepping=false --adjoint-save=true
 mpirun -np 4 flow_adjoint CASE.DATA --enable-storage-cache=false \
-    --adjoint-mode=gradient --adjoint-linear-solver=cpr
+    --enable-adaptive-time-stepping=false --adjoint-mode=gradient
 ```
 
 ### Jutul status

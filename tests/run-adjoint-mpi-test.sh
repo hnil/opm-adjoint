@@ -33,7 +33,16 @@ fi
 DECKNAME=$(basename "${DECK}" .DATA)
 # Directory store (--adjoint-file without .h5): dependency-free and
 # per-rank, so the test does not require parallel HDF5.
+#
+# --enable-adaptive-time-stepping=false is REQUIRED: with adaptive
+# stepping the parallel forward run can take a different substep
+# sequence than the serial one (parallel linear solves converge
+# slightly differently -> different Newton -> different chopping), which
+# changes the trajectory and makes the gradients legitimately differ.
+# Fixed report-step stepping pins the same trajectory on every rank
+# count, so any remaining difference is the adjoint machinery.
 STRICT="--enable-storage-cache=false \
+ --enable-adaptive-time-stepping=false \
  --tolerance-cnv=1e-7 --tolerance-cnv-relaxed=1e-7 \
  --tolerance-mb=1e-9 --tolerance-mb-relaxed=1e-9 \
  --adjoint-objective=pressure-average"

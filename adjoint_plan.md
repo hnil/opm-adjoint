@@ -723,11 +723,17 @@ the next feature touches the same code.
 5. DRSDT/VAPPARS (non-recycled storage cache) — add a dedicated replay test before claiming support.
 6. Serial-first was the bring-up choice; **MPI now done** for the
    iterative path (per-rank record/replay via PROCESS_SPLIT HDF5 or
-   per-rank directory store; parallel ghost-last transposed solve;
-   gradients gathered to rank 0). np=2 agrees with serial to ~6e-6 on
-   SPE1. UMFPACK stays single-rank. cprt falsely converges in parallel
-   (transposed-CPR pressure transfer unexercised in parallel) and is
-   rejected at runtime there; use cpr/ilu0 in parallel, cprt in serial.
+   per-rank directory store; gradients gathered to rank 0). The
+   transposed solve needed care: forward gives full rows, the adjoint
+   needs full columns, and a plain local transpose drops cross-rank
+   couplings (wrong gradients for np>=3). Fixed with an exact transposed
+   operator that scatters A^T over the forward matrix's interior rows and
+   communicates the overlap column contributions back to owners
+   (addOwnerCopyToOwnerCopy); preconditioner = opm parallel ILU0,
+   solver = BiCGSTAB. Verified vs serial under FIXED timestepping (a
+   must - adaptive stepping diverges the trajectory across rank counts):
+   PV 1e-5/6e-6/9e-6 for np=2/3/4 on SPE1. UMFPACK stays single-rank
+   (parallel falls back to ilu0); cprt is serial-only (fastest there).
 7. Dependency risk: Milestone B's primary path assumes [#6751](https://github.com/OPM/opm-simulators/pull/6751)
    merges; the Schur-transpose fallback is specified above precisely so PR4 isn't blocked on it.
    Milestone A assumes [#7039](https://github.com/OPM/opm-simulators/pull/7039) semantics for

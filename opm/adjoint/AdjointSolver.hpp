@@ -101,19 +101,19 @@ public:
         objective_.setParallel(&parallel_);
         constexpr std::size_t pressureIndex =
             GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
-        linearSolver_.configure(config_.linearSolver,
+        // umfpack is the serial default but single-rank; fall back to the
+        // iterative parallel path (block-ILU0) when running on >1 rank.
+        std::string linearSolver = config_.linearSolver;
+        if (parallel_.parallel() && linearSolver == "umfpack") {
+            linearSolver = "ilu0";
+        }
+        linearSolver_.configure(linearSolver,
                                 config_.linearSolverReduction,
                                 config_.linearSolverMaxIter,
                                 config_.linearSolverVerbosity,
                                 pressureIndex);
 #if HAVE_MPI
         if (parallel_.parallel()) {
-            if (config_.linearSolver == "umfpack") {
-                OPM_THROW(std::runtime_error,
-                          "Parallel adjoint runs need an iterative linear "
-                          "solver; pass e.g. --adjoint-linear-solver=cprt "
-                          "(umfpack is single-rank).");
-            }
             linearSolver_.setComm(parallel_.istlComm(),
                                   &parallel_.overlapRows());
         }
