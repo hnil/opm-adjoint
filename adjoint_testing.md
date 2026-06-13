@@ -338,6 +338,42 @@ step are negligible. Optimization effort (faster transposed solve /
 preconditioner reuse, and avoiding the full re-linearize per substep) is
 where the time is - not in the gradient kernels.
 
+### Norne (44k cells) — forward records; replay blocked on group control
+
+Norne (NORNE_ATW2013: 44431 active cells, 36 wells with open/shut
+events, group control + guide rates, hysteresis, VAPOIL, faults)
+**records fine** (forward run ~4 min, 393 substeps stored). Replay,
+however, aborts at the first backward substep with
+`std::out_of_range: map::at`.
+
+Precise diagnosis (instrumented phase-by-phase): the crash is in the
+**final-linearization `beginIteration()` -> BlackoilWellModel::assemble
+-> updateWellControlsAndNetwork**, at a report-step boundary (step 246)
+where the schedule has 36 wells but only 22 are live (14 shut). The
+group-control / guide-rate update does a name lookup against the
+freshly-rebuilt well container and throws on a shut well. Two fixes were
+tried and rejected:
+
+- *Skip the control update* (assembleWellEqWithoutIteration only): stops
+  the crash but breaks bitwise replay on the simple decks, because
+  updateWellControlsAndNetwork legitimately affects the converged
+  system - so it cannot be skipped.
+- *Restore the full snapshot-k well-model state* (incl. guide rates)
+  instead of just the WGState: the crash moves to the next missing piece
+  (the summary state the group controls read), confirming this is a
+  **multi-piece state-restoration problem** in flow's group/control
+  machinery, not a single missing field.
+
+Conclusion: replaying group-controlled decks with well events needs the
+adjoint snapshot to capture, and the replay to restore, the *complete*
+group/guide-rate/summary/control state so that
+updateWellControlsAndNetwork can run identically to the forward step.
+That is the "complex explicit updates / control switching" class
+explicitly deferred from v1 (simple blackoil, no hysteresis/DRSDT/group
+control). It is a well-defined follow-up milestone, not a quick fix; the
+v1 scope (SPE1/SPE9-class: single-region controls, no group hierarchy or
+well events) is solid and fully verified.
+
 ### Jutul status
 
 Setup struggled on Julia 1.12 (slow stack precompilation). Full setup
