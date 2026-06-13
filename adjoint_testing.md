@@ -302,18 +302,22 @@ mpirun -np 4 flow_adjoint CASE.DATA --enable-storage-cache=false \
 
 SPE9_CP_SHORT (24x25x15 = 9000 active cells, DISGAS, multi-perforation
 wells) replays **bitwise exact** (21/21 substeps, residual and Jacobian
-rel diff 0.0). Multi-perforation wells need
-`--matrix-add-well-contributions=true` (plus an explicit
-`--linear-solver=ilu0`/`cpr`, since that flag flips the forward default
-to the unregistered `cprw`): the Schur step writes C^T D^-1 B into the
-reservoir matrix, coupling every pair of cells a well perforates, and
-those entries only exist in the sparsity when that option is set.
-Without it the adjoint now fails up front with an actionable message
-instead of segfaulting.
+rel diff 0.0). Multi-perforation wells need the well coupling in the matrix sparsity
+(the Schur step writes C^T D^-1 B, coupling every pair of cells a well
+perforates). The adjoint binary **enables this by default**: it injects
+`--matrix-add-well-contributions=true` and `--linear-solver=ilu0` as
+command-line defaults (below any value the user passes), so a
+multi-perforation deck just works with no extra flags. `ilu0` is used
+for the forward solver because with the well contributions in the matrix
+flow auto-promotes `cpr` to `cprw`, whose preconditioner is not
+registered in this build; `ilu0` is robust on any size and is not
+promoted (the adjoint backward solves use their own
+`--adjoint-linear-solver` regardless). If `--matrix-add-well-contributions
+=false` is passed explicitly with a multi-perforation deck, the run
+fails up front with an actionable message instead of segfaulting.
 
 ```bash
-S="--enable-storage-cache=false --enable-adaptive-time-stepping=false \
-   --matrix-add-well-contributions=true --linear-solver=ilu0 --adjoint-file=a"
+S="--enable-storage-cache=false --enable-adaptive-time-stepping=false --adjoint-file=a"
 flow_adjoint SPE9_CP_SHORT.DATA $S --adjoint-save=true
 flow_adjoint SPE9_CP_SHORT.DATA $S --adjoint-mode=gradient --adjoint-linear-solver=cprt
 ```

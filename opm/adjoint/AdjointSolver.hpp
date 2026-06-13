@@ -304,11 +304,10 @@ private:
         if (maxPerf > 1) {
             OPM_THROW(std::runtime_error,
                       "Adjoint gradient runs with multi-perforation wells "
-                      "require --matrix-add-well-contributions=true so the "
-                      "Jacobian carries the well-coupling sparsity used by "
-                      "the Schur complement. Re-run with that option (and "
-                      "an explicit --linear-solver=ilu0/cpr, since it "
-                      "changes the forward default).");
+                      "need the well-coupling sparsity used by the Schur "
+                      "complement, but --matrix-add-well-contributions=false "
+                      "was passed explicitly. Remove that override (the "
+                      "adjoint binary enables it by default).");
         }
     }
 

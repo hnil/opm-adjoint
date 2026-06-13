@@ -153,7 +153,47 @@ int main(int argc, char** argv)
         }
     }
 
-    auto mainObject = std::make_unique<Opm::AdjointMain>(argc, argv);
+    // Adjoint-appropriate defaults, injected as command-line arguments so
+    // they sit below any value the user passes explicitly (an injected
+    // arg only takes effect when the user did not set that option):
+    //   - the Schur step (addWellContributions) needs the well coupling
+    //     in the matrix sparsity, so default --matrix-add-well-contributions
+    //     on (single-perforation decks are unaffected; multi-perforation
+    //     decks would otherwise crash without it);
+    //   - with that flag on, flow auto-promotes the forward solver "cpr"
+    //     to "cprw" (CPR with the well system in the matrix), which is not
+    //     registered in this build; "ilu0" is robust on any problem size
+    //     (incl. the 3-cell test deck) and is not promoted, so default the
+    //     forward solver to it. The adjoint backward solves use their own
+    //     --adjoint-linear-solver and are unaffected.
+    // Done via argv injection (not Parameters::SetDefault) because the
+    // model/linalg parameters are registered after the problem, so a
+    // SetDefault in the problem's registerParameters runs too early.
+    std::vector<std::string> injected;
+    auto hasOption = [argc, argv](const char* opt) {
+        const std::size_t n = std::strlen(opt);
+        for (int i = 1; i < argc; ++i) {
+            if (std::strncmp(argv[i], opt, n) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!hasOption("--matrix-add-well-contributions")) {
+        injected.emplace_back("--matrix-add-well-contributions=true");
+    }
+    if (!hasOption("--linear-solver")) {
+        injected.emplace_back("--linear-solver=ilu0");
+    }
+
+    std::vector<char*> args(argv, argv + argc);
+    for (auto& opt : injected) {
+        args.push_back(opt.data());
+    }
+    int newArgc = static_cast<int>(args.size());
+    char** newArgv = args.data();
+
+    auto mainObject = std::make_unique<Opm::AdjointMain>(newArgc, newArgv);
     const int exitCode = mode.empty() ? mainObject->runForward<TypeTag>()
                                       : mainObject->runReplay<TypeTag>(mode);
     // Destruct mainObject as the destructor calls MPI_Finalize!
