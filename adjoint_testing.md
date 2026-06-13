@@ -240,6 +240,48 @@ trueimpes weights are not supported (they need forward-simulator
 internals); quasiimpes only. Serial only — MPI is the next milestone
 and requires this iterative path (UMFPACK is single-rank).
 
+### MPI / parallel adjoint — np=2 verified against serial
+
+Recording, replay and the transposed solve are all parallel. Each rank
+stores and reads back its own partition: the HDF5 archive uses
+PROCESS_SPLIT (one dataset per rank, the same mechanism as flow's
+save/load-step), and the directory store gets a per-rank sub-directory.
+The transposed solve runs on the parallel ghost-last operator
+(interior rows + copyOwnerToAll); lambda is made consistent on ghost
+cells after each solve so the flux / Bdiag cross terms that read a
+neighbor's lambda are correct. Per-cell and per-face gradients are
+gathered onto rank 0 (sorted by cartesian id) for output; serial output
+is byte-identical to the pre-MPI behavior (the gather is the identity in
+serial), so the existing references and regression test are unchanged.
+
+```bash
+tests/run-adjoint-mpi-test.sh <flow_adjoint> <deck.DATA> <outdir> [nprocs] [rel-tol]
+```
+
+Compares the np=1 and np=N PV gradient as a sorted value multiset
+(ordering-agnostic, since the partitioned grid reorders cells). SPE1,
+np=2: **5.9e-6** vs serial. ctest `adjoint_mpi_spe1` (auto-skips when no
+MPI launcher is found).
+
+**Linear solver in parallel — a cprt finding.** ilu0 and cpr are
+correct in parallel (both 5.5e-6 vs serial on SPE1); **cprt falsely
+converges in parallel** — it reports convergence in ~7 iterations (like
+serial) but the lambda is ~60x too small, so the gradient is wrong. The
+transposed CPR pressure transfer has evidently not been exercised in a
+parallel setting (the "cprt unexercised for years" risk, now pinned to
+parallel). cprt is rejected at runtime in parallel with a message
+pointing to cpr/ilu0; it remains the fastest correct choice in serial.
+So: **serial → cprt, parallel → cpr (or ilu0)**. UMFPACK stays
+single-rank (also rejected in parallel).
+
+Run any parallel adjoint manually with e.g.:
+```bash
+mpirun -np 4 flow_adjoint CASE.DATA --enable-storage-cache=false \
+    --adjoint-save=true
+mpirun -np 4 flow_adjoint CASE.DATA --enable-storage-cache=false \
+    --adjoint-mode=gradient --adjoint-linear-solver=cpr
+```
+
 ### Jutul status
 
 Setup struggled on Julia 1.12 (slow stack precompilation). Full setup

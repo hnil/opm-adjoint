@@ -49,6 +49,8 @@
 
 #include <opm/models/utils/propertysystem.hh>
 
+#include <opm/adjoint/AdjointParallel.hpp>
+
 #include <algorithm>
 #include <cstddef>
 #include <memory>
@@ -195,7 +197,13 @@ public:
             const auto& solution = simulator.model().solution(/*timeIdx=*/0);
             Scalar sum = 0.0;
             for (std::size_t i = 0; i < solution.size(); ++i) {
+                if (par_ && !par_->interior(i)) {
+                    continue;  // skip ghost cells (owned by another rank)
+                }
                 sum += solution[i][Indices::pressureSwitchIdx];
+            }
+            if (par_) {
+                return par_->sum(sum) / globalNumCells_(simulator);
             }
             return sum / solution.size();
         }
@@ -232,10 +240,20 @@ public:
             return;
         }
         const std::size_t numCells = simulator.model().solution(0).size();
+        const Scalar denom = par_ ? globalNumCells_(simulator)
+                                  : static_cast<Scalar>(numCells);
         for (std::size_t i = 0; i < numCells; ++i) {
-            gradient[i][Indices::pressureSwitchIdx] += 1.0 / numCells;
+            // ghost cells get the same per-cell weight; their rhs rows are
+            // zeroed before the transposed solve, so this is harmless and
+            // keeps the interior rows correct.
+            gradient[i][Indices::pressureSwitchIdx] += 1.0 / denom;
         }
     }
+
+    //! \brief Connect the parallel context (interior mask + reductions);
+    //!        null in serial runs.
+    void setParallel(const AdjointParallel<TypeTag>* par)
+    { par_ = par; }
 
     //! \brief dJ_k/d(bhp of \p well) for the bhp objective.
     Scalar bhpGradient(const std::string& well, double dt) const
@@ -389,9 +407,29 @@ private:
         return parts;
     }
 
+    //! \brief Global number of interior cells (cached), for the
+    //!        pressure-average denominator.
+    Scalar globalNumCells_(const Simulator& simulator) const
+    {
+        if (globalNumCells_cached_ < 0) {
+            const auto& solution = simulator.model().solution(/*timeIdx=*/0);
+            Scalar localInterior = 0.0;
+            for (std::size_t i = 0; i < solution.size(); ++i) {
+                if (!par_ || par_->interior(i)) {
+                    localInterior += 1.0;
+                }
+            }
+            globalNumCells_cached_ = par_ ? par_->sum(localInterior)
+                                          : localInterior;
+        }
+        return globalNumCells_cached_;
+    }
+
     Kind kind_{Kind::PressureAverage};
     std::string wellName_{};           //!< bhp objective
     std::vector<RateTerm> terms_;      //!< rate-family objectives
+    const AdjointParallel<TypeTag>* par_{nullptr};
+    mutable Scalar globalNumCells_cached_{-1};
 };
 
 } // namespace Opm

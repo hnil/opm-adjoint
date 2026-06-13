@@ -144,6 +144,12 @@ if(HAVE_OPM_TESTS)
               $<TARGET_FILE:flow_adjoint>
               ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/solver_spe1
               1e-5 cprt)
+    # Parallel (np=2) vs serial gradient agreement; the script skips
+    # itself when no MPI launcher is available.
+    add_test(NAME adjoint_mpi_spe1
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-mpi-test.sh
+              $<TARGET_FILE:flow_adjoint>
+              ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA ${_testout}/mpi_spe1 2)
   endif()
 endif()
 # Match the opm build conventions (notably -UNDEBUG in Release when

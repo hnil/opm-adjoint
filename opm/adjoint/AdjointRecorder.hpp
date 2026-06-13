@@ -64,7 +64,9 @@ public:
             path = AdjointArchive::defaultPath(ioConfig.getOutputDir(),
                                                simulator_.vanguard().caseName());
         }
-        archive_ = std::make_unique<AdjointArchive>(path, AdjointArchive::Mode::Write);
+        archive_ = std::make_unique<AdjointArchive>(
+            path, AdjointArchive::Mode::Write,
+            simulator_.vanguard().gridView().comm());
 
         meta_.systemSaved = config_.saveSystem;
         meta_.storageCacheEnabled = Parameters::Get<Parameters::EnableStorageCache>();

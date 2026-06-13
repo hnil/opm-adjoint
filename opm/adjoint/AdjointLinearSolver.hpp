@@ -37,8 +37,12 @@
  *    need simulator internals and are not supported here - quasiimpes
  *    only.
  *
- * Serial only (MPI is a later milestone; UMFPACK and the sequential
- * MatrixAdapter both assume one rank).
+ * Parallel runs use the iterative path with the ghost-last operator
+ * (interior rows only + copyOwnerToAll): the locally transposed matrix
+ * has correct interior rows (see AdjointParallel.hpp for why), the
+ * ghost rows are invalidated like in the forward ISTLSolver (except for
+ * paroverilu0, which handles the overlap itself). UMFPACK remains
+ * single-rank.
  */
 #ifndef OPM_ADJOINT_LINEAR_SOLVER_HPP
 #define OPM_ADJOINT_LINEAR_SOLVER_HPP
@@ -48,6 +52,7 @@
 #include <opm/simulators/linalg/PropertyTree.hpp>
 
 #include <opm/simulators/linalg/FlexibleSolver.hpp>
+#include <opm/simulators/linalg/WellOperators.hpp>
 #include <opm/simulators/linalg/FlowLinearSolverParameters.hpp>
 #include <opm/simulators/linalg/getQuasiImpesWeights.hpp>
 #include <opm/simulators/linalg/setupPropertyTree.hpp>
@@ -60,6 +65,9 @@
 
 #include <dune/istl/operators.hh>
 #include <dune/istl/solver.hh>
+#if HAVE_MPI
+#include <dune/istl/owneroverlapcopy.hh>
+#endif
 
 #include <fmt/format.h>
 
@@ -147,6 +155,38 @@ public:
         ++numSolves_;
     }
 
+#if HAVE_MPI
+    //! \brief Enable the parallel solve path (ghost-last operator).
+    //!
+    //! \param comm ISTL communication (owner/overlap/copy)
+    //! \param overlapRows local indices of the ghost rows
+    void setComm(const Dune::OwnerOverlapCopyCommunication<int, int>* comm,
+                 const std::vector<int>* overlapRows)
+    {
+        comm_ = comm;
+        overlapRows_ = overlapRows;
+        if (comm_ && spec_ == "umfpack") {
+            OPM_THROW(std::runtime_error,
+                      "--adjoint-linear-solver=umfpack is a single-rank "
+                      "direct solver; parallel adjoint runs need an "
+                      "iterative solver (cpr, ilu0 or a *.json config)");
+        }
+        // cprt (transpose-CPR) falsely converges in parallel: it reports
+        // convergence quickly but the lambda is wrong (verified against
+        // serial and against cpr/ilu0 on SPE1). The transposed pressure
+        // transfer has not been exercised in a parallel setting. cprt is
+        // correct and fastest in serial; in parallel use cpr or ilu0.
+        if (comm_ && (spec_ == "cprt" || spec_ == "cprwt" ||
+                      transposedWeights_)) {
+            OPM_THROW(std::runtime_error,
+                      "--adjoint-linear-solver=cprt is not reliable in "
+                      "parallel (false convergence of the transposed CPR). "
+                      "Use cpr or ilu0 for parallel adjoint runs; cprt is "
+                      "fine in serial.");
+        }
+    }
+#endif
+
     //! \brief Iterations of the iterative path summed over all solves
     //!        (0 for umfpack).
     int totalIterations() const
@@ -185,10 +225,7 @@ private:
 
     void solveIterative_(const Matrix& matrix, Vector& rhs, Vector& solution)
     {
-        const Matrix transposed = transposeBlockMatrixSameType(matrix);
-
-        using Operator = Dune::MatrixAdapter<Matrix, Vector, Vector>;
-        Operator op(transposed);
+        Matrix transposed = transposeBlockMatrixSameType(matrix);
 
         std::function<Vector()> weightsCalculator;
         if (usesCprWeights_) {
@@ -206,10 +243,38 @@ private:
             };
         }
 
-        Dune::FlexibleSolver<Operator> solver(op, prm_, weightsCalculator,
-                                              pressureIndex_);
         Dune::InverseOperatorResult result;
-        solver.apply(solution, rhs, result);
+#if HAVE_MPI
+        if (comm_) {
+            // ghost rows of the local transpose are incomplete; replace
+            // them by identity like the forward solver does (paroverilu0
+            // handles the overlap itself and keeps the assembled rows)
+            const auto precType =
+                prm_.template get<std::string>("preconditioner.type", "");
+            if (precType != "paroverilu0" && precType != "ParOverILU0") {
+                invalidateRows_(transposed, *overlapRows_);
+            }
+            for (const int row : *overlapRows_) {
+                rhs[row] = 0.0;
+            }
+
+            using ParOperator =
+                Opm::GhostLastMatrixAdapter<Matrix, Vector, Vector,
+                                            Dune::OwnerOverlapCopyCommunication<int, int>>;
+            ParOperator op(transposed, *comm_);
+            Dune::FlexibleSolver<ParOperator> solver(op, *comm_, prm_,
+                                                     weightsCalculator,
+                                                     pressureIndex_);
+            solver.apply(solution, rhs, result);
+        } else
+#endif
+        {
+            using Operator = Dune::MatrixAdapter<Matrix, Vector, Vector>;
+            Operator op(transposed);
+            Dune::FlexibleSolver<Operator> solver(op, prm_, weightsCalculator,
+                                                  pressureIndex_);
+            solver.apply(solution, rhs, result);
+        }
 
         if (!result.converged) {
             OPM_THROW(std::runtime_error,
@@ -225,11 +290,27 @@ private:
                                   spec_, result.iterations, result.reduction));
     }
 
+    static void invalidateRows_(Matrix& matrix, const std::vector<int>& rows)
+    {
+        typename Matrix::block_type identity(0.0);
+        for (int eq = 0; eq < static_cast<int>(Matrix::block_type::rows); ++eq) {
+            identity[eq][eq] = 1.0;
+        }
+        for (const int row : rows) {
+            matrix[row] = 0.0;
+            matrix[row][row] = identity;
+        }
+    }
+
     std::string spec_{"umfpack"};
     PropertyTree prm_{};
     bool usesCprWeights_ = false;
     bool transposedWeights_ = false;
     std::size_t pressureIndex_ = 1;
+#if HAVE_MPI
+    const Dune::OwnerOverlapCopyCommunication<int, int>* comm_ = nullptr;
+    const std::vector<int>* overlapRows_ = nullptr;
+#endif
     int totalIterations_ = 0;
     int numSolves_ = 0;
 };

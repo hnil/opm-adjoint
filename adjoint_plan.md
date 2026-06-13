@@ -721,7 +721,13 @@ the next feature touches the same code.
 4. Aquifer/tracer/drift cross-step terms: replayed exactly (A fine) but ignored in adjoint —
    exclude from gradient tests; `--enable-drift-compensation=false` for gradient runs.
 5. DRSDT/VAPPARS (non-recycled storage cache) — add a dedicated replay test before claiming support.
-6. Serial-first throughout; MPI explicitly deferred (UMFPack, single-rank replay).
+6. Serial-first was the bring-up choice; **MPI now done** for the
+   iterative path (per-rank record/replay via PROCESS_SPLIT HDF5 or
+   per-rank directory store; parallel ghost-last transposed solve;
+   gradients gathered to rank 0). np=2 agrees with serial to ~6e-6 on
+   SPE1. UMFPACK stays single-rank. cprt falsely converges in parallel
+   (transposed-CPR pressure transfer unexercised in parallel) and is
+   rejected at runtime there; use cpr/ilu0 in parallel, cprt in serial.
 7. Dependency risk: Milestone B's primary path assumes [#6751](https://github.com/OPM/opm-simulators/pull/6751)
    merges; the Schur-transpose fallback is specified above precisely so PR4 isn't blocked on it.
    Milestone A assumes [#7039](https://github.com/OPM/opm-simulators/pull/7039) semantics for

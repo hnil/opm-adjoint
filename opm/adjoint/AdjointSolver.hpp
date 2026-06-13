@@ -48,6 +48,7 @@
 #include <opm/adjoint/AdjointEndpointGradients.hpp>
 #include <opm/adjoint/AdjointLinearSolver.hpp>
 #include <opm/adjoint/AdjointObjective.hpp>
+#include <opm/adjoint/AdjointParallel.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
 
 #include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
@@ -91,11 +92,13 @@ public:
 
     explicit AdjointSolver(Simulator& simulator)
         : simulator_(simulator)
-        , replay_(simulator)
         , config_(AdjointConfig::fromParameters())
+        , replay_(simulator)
+        , parallel_(simulator)
         , objective_(config_.objective)
     {
         replay_.setComputeBdiag(true);
+        objective_.setParallel(&parallel_);
         constexpr std::size_t pressureIndex =
             GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
         linearSolver_.configure(config_.linearSolver,
@@ -103,6 +106,18 @@ public:
                                 config_.linearSolverMaxIter,
                                 config_.linearSolverVerbosity,
                                 pressureIndex);
+#if HAVE_MPI
+        if (parallel_.parallel()) {
+            if (config_.linearSolver == "umfpack") {
+                OPM_THROW(std::runtime_error,
+                          "Parallel adjoint runs need an iterative linear "
+                          "solver; pass e.g. --adjoint-linear-solver=cprt "
+                          "(umfpack is single-rank).");
+            }
+            linearSolver_.setComm(parallel_.istlComm(),
+                                  &parallel_.overlapRows());
+        }
+#endif
         const std::string endpointSpec = config_.endpoints;
         std::size_t pos = 0;
         while (pos != std::string::npos && pos < endpointSpec.size()) {
@@ -199,6 +214,10 @@ public:
 
             // Solve A_red^T lambda_k = rhs.
             linearSolver_.solveTransposed(jacobian.istlMatrix(), rhs, lambda);
+            // lambda is owner-correct after the solve; make it consistent
+            // on ghost cells so the flux/Bdiag cross terms (which read a
+            // neighbor's lambda, possibly a ghost) are correct.
+            parallel_.makeConsistent(lambda);
 
             computeWellAdjoints_(k, step.dt, lambda);
             accumulateGradients_(step.dt, lambda);
@@ -397,13 +416,18 @@ private:
         // kernels, mirroring linearize_cell.
         const auto& neighborInfo = model.linearizer().getNeighborInfo();
         if (gradientTrans_.empty()) {
-            // Face list (I < J) built on first use.
+            // Local face list (I < J) built on first use. In parallel a
+            // face shared with another rank (interior-ghost) is owned by
+            // exactly one rank (ownsFace), so the gathered global trans
+            // gradient counts each face once.
             for (std::size_t globI = 0; globI < numCells; ++globI) {
                 const auto& nbInfos = neighborInfo[globI];
                 for (const auto& nbInfo : nbInfos) {
                     if (nbInfo.neighbor > globI) {
                         faces_.push_back({globI, nbInfo.neighbor});
                         faceDirs_.push_back(nbInfo.res_nbinfo.faceDir);
+                        ownedFace_.push_back(
+                            parallel_.ownsFace(globI, nbInfo.neighbor));
                     }
                 }
             }
@@ -419,6 +443,8 @@ private:
                 if (globJ <= globI) {
                     continue;
                 }
+                // Computed for all local faces; output filters to owned
+                // faces (TRANS) and interior endpoints (PERM).
                 const auto& intQuantsEx = model.intensiveQuantities(globJ, /*timeIdx=*/0);
                 Dune::FieldVector<Evaluation, numEq> flux(0.0);
                 Dune::FieldVector<Evaluation, numEq> darcy(0.0);
@@ -502,6 +528,13 @@ private:
         for (std::size_t p = 0; p < endpointDefs_.size(); ++p) {
             const auto& def = *endpointDefs_[p];
             for (unsigned i = 0; i < numCells; ++i) {
+                // Each interior cell is perturbed on exactly one rank; the
+                // perturbation is rank-local, so the contraction (summed
+                // over all local rows, incl. ghosts that share a face with
+                // i) captures the full effect with no global reduction.
+                if (!parallel_.interior(i)) {
+                    continue;
+                }
                 perturber.apply(i, def, h);
                 const Scalar plus = relinearizedContraction();
                 perturber.apply(i, def, -h);
@@ -526,12 +559,50 @@ private:
         const std::string base = ioConfig.getOutputDir() + "/" +
                                  simulator_.vanguard().caseName();
 
+        // Per-cell fields: gather interior cells onto rank 0 (sorted by
+        // global id in parallel; identity in serial, so serial output is
+        // byte-identical to the pre-MPI behavior).
+        const auto pvGathered = parallel_.gatherCellField(gradientPv_);
+        std::vector<std::vector<Scalar>> endpointGathered;
+        for (const auto& g : gradientEndpoints_) {
+            endpointGathered.push_back(parallel_.gatherCellField(g));
+        }
+        // Transmissibility faces: owned faces only, with global cell ids.
+        std::vector<std::string> transLines;
+        for (std::size_t f = 0; f < faces_.size(); ++f) {
+            if (!ownedFace_.empty() && !ownedFace_[f]) {
+                continue;
+            }
+            std::ostringstream line;
+            line.precision(16);
+            line << faceId_(faces_[f].first) << " " << faceId_(faces_[f].second)
+                 << " " << gradientTrans_[f];
+            transLines.push_back(line.str());
+        }
+        transLines = parallel_.gatherLines(transLines);
+        // Well outputs are naturally partitioned (a well lives on one rank).
+        std::vector<std::string> wellCtrlLines;
+        for (const auto& [well, value] : controlGradient_) {
+            std::ostringstream line;
+            line.precision(16);
+            line << well << " " << value;
+            wellCtrlLines.push_back(line.str());
+        }
+        wellCtrlLines = parallel_.gatherLines(wellCtrlLines);
+        const auto lambdaLines = parallel_.gatherLines(wellAdjointLog_);
+
+        const auto permGathered = gatherPermGradients_();
+
+        if (parallel_.rank() != 0) {
+            return;
+        }
+
         {
             std::ofstream os(base + ".ADJOINT_GRADIENTS_PV.txt");
             os.precision(16);
             os << "# dJ/d(pvmult_i), one line per cell (J = " << objectiveValue
                << ")\n";
-            for (const auto& value : gradientPv_) {
+            for (const auto& value : pvGathered) {
                 os << value << "\n";
             }
         }
@@ -540,19 +611,26 @@ private:
             os.precision(16);
             os << "# dJ/d(tmult_f): cellI cellJ gradient (J = " << objectiveValue
                << ")\n";
-            for (std::size_t f = 0; f < faces_.size(); ++f) {
-                os << faces_[f].first << " " << faces_[f].second << " "
-                   << gradientTrans_[f] << "\n";
+            for (const auto& line : transLines) {
+                os << line << "\n";
             }
         }
-        writePermGradients_(base);
+        {
+            std::ofstream os(base + ".ADJOINT_GRADIENTS_PERM.txt");
+            os.precision(16);
+            os << "# dJ/dPERMX dJ/dPERMY dJ/dPERMZ per cell, SI (per m^2); "
+                  "multiply by 9.869233e-16 for per-mD\n";
+            for (const auto& g : permGathered) {
+                os << g[0] << " " << g[1] << " " << g[2] << "\n";
+            }
+        }
         for (std::size_t p = 0; p < endpointDefs_.size(); ++p) {
             std::ofstream os(base + ".ADJOINT_GRADIENTS_ENDPOINT_" +
                              endpointDefs_[p]->name + ".txt");
             os.precision(16);
             os << "# dJ/d(" << endpointDefs_[p]->name
                << "_i), one line per cell\n";
-            for (const auto& value : gradientEndpoints_[p]) {
+            for (const auto& value : endpointGathered[p]) {
                 os << value << "\n";
             }
         }
@@ -562,15 +640,15 @@ private:
             os << "# dJ/d(active control target) per well, summed over all "
                   "substeps; SI units (rate targets: per m3/s, bhp targets: "
                   "per Pa)\n";
-            for (const auto& [well, value] : controlGradient_) {
-                os << well << " " << value << "\n";
+            for (const auto& line : wellCtrlLines) {
+                os << line << "\n";
             }
         }
         {
             std::ofstream os(base + ".ADJOINT_LAMBDA_WELLS.txt");
             os << "# substep well lambda_w (one line per well per substep, "
                   "backward order)\n";
-            for (const auto& line : wellAdjointLog_) {
+            for (const auto& line : lambdaLines) {
                 os << line << "\n";
             }
         }
@@ -582,6 +660,15 @@ private:
                      ".ADJOINT_GRADIENTS_{" + kinds + "}.txt");
     }
 
+    //! \brief Global id for a transmissibility-face endpoint (cartesian
+    //!        index in parallel; local index in serial so the serial
+    //!        output stays byte-identical to the pre-MPI behavior).
+    long faceId_(std::size_t localCell) const
+    {
+        return parallel_.parallel() ? parallel_.cartesianIndex(localCell)
+                                    : static_cast<long>(localCell);
+    }
+
     //! \brief Permeability chain rule, post-processed from the
     //!        transmissibility-multiplier gradients:
     //!        dJ/dK_in^dir = sum_faces g_tmult[f] (h_out/(h_in+h_out)) / K_in^dir
@@ -589,11 +676,16 @@ private:
     //!        transmissibilities, which are linear in the directional
     //!        permeability; multipliers cancel since g_tmult is the
     //!        multiplier-based gradient).
-    void writePermGradients_(const std::string& base)
+    //!
+    //! In parallel each interior cell collects the contributions of all
+    //! its incident local faces (the face's flux gradient is the same on
+    //! both sides since lambda is made consistent), so the gathered
+    //! per-cell result is correct without ghost-row reduction; ghost-cell
+    //! accumulations are dropped on gather.
+    std::vector<std::array<Scalar, 3>> gatherPermGradients_()
     {
         const auto& trans = simulator_.problem().eclTransmissibilities();
         const std::size_t numCells = simulator_.model().numGridDof();
-        // per cell: d/dPERMX, d/dPERMY, d/dPERMZ (SI: per m^2)
         std::vector<std::array<Scalar, 3>> gradient(numCells, {0.0, 0.0, 0.0});
 
         for (std::size_t f = 0; f < faces_.size(); ++f) {
@@ -617,28 +709,39 @@ private:
             const Scalar kIn = trans.permeability(globI)[dim][dim];
             const Scalar kOut = trans.permeability(globJ)[dim][dim];
             const Scalar g = gradientTrans_[f];
-            if (kIn > 0.0) {
+            // Add to each endpoint only if it is interior on this rank;
+            // a ghost endpoint's contribution is added on its owner.
+            if (kIn > 0.0 && parallel_.interior(globI)) {
                 gradient[globI][dim] += g * (hOut / (hIn + hOut)) / kIn;
             }
-            if (kOut > 0.0) {
+            if (kOut > 0.0 && parallel_.interior(globJ)) {
                 gradient[globJ][dim] += g * (hIn / (hIn + hOut)) / kOut;
             }
         }
 
-        std::ofstream os(base + ".ADJOINT_GRADIENTS_PERM.txt");
-        os.precision(16);
-        os << "# dJ/dPERMX dJ/dPERMY dJ/dPERMZ per cell, SI (per m^2); "
-              "multiply by 9.869233e-16 for per-mD\n";
-        for (const auto& g : gradient) {
-            os << g[0] << " " << g[1] << " " << g[2] << "\n";
+        // Gather each permeability direction as a per-cell field.
+        std::array<std::vector<Scalar>, 3> comp;
+        for (int d = 0; d < 3; ++d) {
+            std::vector<Scalar> column(numCells);
+            for (std::size_t i = 0; i < numCells; ++i) {
+                column[i] = gradient[i][d];
+            }
+            comp[d] = parallel_.gatherCellField(column);
         }
+        std::vector<std::array<Scalar, 3>> result(comp[0].size());
+        for (std::size_t i = 0; i < result.size(); ++i) {
+            result[i] = {comp[0][i], comp[1][i], comp[2][i]};
+        }
+        return result;
     }
 
     Simulator& simulator_;
     AdjointConfig config_;
     Replay replay_;
+    AdjointParallel<TypeTag> parallel_;
     AdjointObjectiveFunction<TypeTag> objective_;
     AdjointLinearSolver<Matrix, Vector> linearSolver_;
+    std::vector<bool> ownedFace_;
 
     std::vector<Scalar> gradientPv_;
     std::vector<std::pair<std::size_t, unsigned>> faces_;

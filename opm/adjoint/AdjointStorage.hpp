@@ -42,10 +42,11 @@
 
 #include <opm/simulators/utils/SerializationPackers.hpp>
 
+#include <opm/simulators/utils/ParallelCommunication.hpp>
+
 #if HAVE_HDF5
 #include <opm/simulators/utils/HDF5File.hpp>
 #include <opm/simulators/utils/HDF5Serializer.hpp>
-#include <opm/simulators/utils/ParallelCommunication.hpp>
 #endif
 
 #include <filesystem>
@@ -160,7 +161,12 @@ public:
 
     //! \param path Archive path; *.h5/*.hdf5 selects the HDF5 backend.
     //! \param mode Write (forward recording) or Read (replay/adjoint).
-    explicit AdjointArchive(const std::string& path, Mode mode)
+    //! \param comm Grid communicator; the HDF5 backend stores one
+    //!             per-rank dataset (PROCESS_SPLIT), and the directory
+    //!             store uses a per-rank sub-directory, so each rank
+    //!             reads back exactly the local partition it wrote.
+    explicit AdjointArchive(const std::string& path, Mode mode,
+                            Parallel::Communication comm = Parallel::Communication{})
     {
         if (isHdf5Path(path)) {
 #if HAVE_HDF5
@@ -168,7 +174,7 @@ public:
                 path,
                 mode == Mode::Write ? HDF5File::OpenMode::OVERWRITE
                                     : HDF5File::OpenMode::READ,
-                Parallel::Communication{});
+                comm);
 #else
             OPM_THROW(std::runtime_error,
                       "Adjoint archive path " + path + " requests the HDF5 "
@@ -176,8 +182,15 @@ public:
                       "path without .h5 suffix for the directory store.");
 #endif
         } else {
+            // The directory store has no per-rank dataset splitting, so
+            // give each rank its own sub-directory in a parallel run.
+            std::string dirPath = path;
+            if (comm.size() > 1) {
+                dirPath = (std::filesystem::path(path) /
+                           ("rank_" + std::to_string(comm.rank()))).string();
+            }
             raw_ = std::make_unique<AdjointRawDirSerializer>(
-                path,
+                dirPath,
                 mode == Mode::Write ? AdjointRawDirSerializer::Mode::Write
                                     : AdjointRawDirSerializer::Mode::Read);
         }

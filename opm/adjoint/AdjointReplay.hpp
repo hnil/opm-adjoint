@@ -89,7 +89,9 @@ public:
             path = AdjointArchive::defaultPath(ioConfig.getOutputDir(),
                                                simulator_.vanguard().caseName());
         }
-        archive_ = std::make_unique<AdjointArchive>(path, AdjointArchive::Mode::Read);
+        archive_ = std::make_unique<AdjointArchive>(
+            path, AdjointArchive::Mode::Read,
+            simulator_.vanguard().gridView().comm());
         archive_->read(meta_, AdjointGroups::meta(), "meta");
 
         if (meta_.schemaVersion != AdjointMeta::currentSchemaVersion) {
