@@ -211,11 +211,13 @@ public:
         archive_->read(wellModel_(), AdjointGroups::substep(k), "wgstate");
         model_().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
 
-        // Final linearization at the converged point (iteration >= 1, so the
-        // explicit well quantities from the iteration-0 pass are preserved).
-        problem_().beginIteration();
+        // Final linearization at the converged point. Assemble the well
+        // equations from the restored converged controls WITHOUT
+        // re-deriving the control/group/network/guide-rate state (which
+        // does not reproduce the forward's converged values and crashes on
+        // shut wells); recompute only the well-local quantities.
+        wellModel_().assembleWellEqGivenControls(meta.dt);
         model_().linearizer().linearizeDomain();
-        problem_().endIteration();
 
         return compareWithStored_(k, worstResidual, worstJacobian);
     }

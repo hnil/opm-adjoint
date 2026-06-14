@@ -160,6 +160,40 @@ the original expression), so it is result-neutral by inspection, and it
 establishes the single injection point the rest of the refactor builds
 on. Verify: full bitwise suite + one `flow` deck `.UNSMRY` diff.
 
+## 3a. Progress (2026-06-13): the assembly entry point exists
+
+The opm-simulators side now has `BlackoilWellModel::assembleWellEqGivenControls(dt)`
+(additive, forward-neutral): it assembles the well equations at a
+restored converged state — `updatePrimaryVariables` +
+`prepareWellsBeforeAssembling` + `assembleWellEqWithoutIteration` +
+`updateCellRates` — **without** re-running the control/group/network/
+guide-rate advance. The adjoint replay's final linearization now calls
+it instead of the full `beginIteration` (which re-ran the advance).
+
+Verified with a fast group-control repro
+(`model2/0A1_GRCTRL_LRAT_ORAT_BASE_MODEL2_STW`, 2794 cells, ~2 s):
+
+- **Result-neutral on the verified envelope**: m1d, SPE1 (123/123) and
+  SPE9 (21/21) stay bitwise; full suite 14/14. The forward is untouched.
+- **Group control improved**: the re-run-advance path gave a Jacobian rel
+  diff of ~7e-2 and a residual rel diff of ~1.0 (garbage); the new path
+  brings the **Jacobian to ~1.6e-3** — the well-local derivatives are now
+  reproduced. The remaining gap is the **residual**, i.e. the
+  group-derived well *target* in the control equation: it is set during
+  the skipped `updateWellControls` from the group state, so the restored
+  well/group state does not yet fully reconstruct it. That is the next
+  increment (carry the converged per-well effective target in the bundle,
+  or restore it into `well_state` so the control equation uses it).
+- **Norne** no longer crashes in the advance; the crash moved into the
+  well-local recompute (`prepareWellsBeforeAssembling`/
+  `updatePrimaryVariables` still do a shut-well name lookup). Handling
+  shut wells in the recompute is the other remaining increment.
+
+So Stage 1's keystone — a forward-neutral "assemble at restored controls"
+entry point — is in place and correct for the well-local part. What
+remains for field decks: (i) reconstruct the group-derived well target,
+(ii) make the well-local recompute shut-well-safe.
+
 ## 4. Why this is the right shape
 
 The TPFA reservoir kernels already went through exactly this separation
