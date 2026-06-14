@@ -177,6 +177,18 @@ work-arounds both fail for principled reasons: skipping (A) changes the
 converged system (so it breaks bitwise replay on simple decks too), and
 restoring more state piecemeal just exposes the next out-of-band read.
 
+A sharper finding (verified directly in this tree, 2026-06-13): the full
+converged state *is* serialized — `Simulator::serializeOp` writes the
+vanguard (→ summary state), model and problem (→ well model → guide
+rates). Yet restoring all of it and calling (B) directly still does not
+reproduce the forward system, because (B) re-derives the controls from
+the *live* `simulator.vanguard().summaryState()`
+(`WellInterface_impl.hpp:990`) and depends on transient state that only
+(A) writes onto the live well objects. So the obstacle is not forgotten
+data; it is that (B) is not closed over serialized state. The concrete,
+staged, result-preserving refactoring is in **`adjoint_refactoring.md`**;
+the summary below is the high-level shape.
+
 ### 3.4 Recommended refactoring (upstream, opm-simulators)
 
 **Make the well-equation assembly a pure function of an explicit,
