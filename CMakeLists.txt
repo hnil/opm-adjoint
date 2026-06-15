@@ -128,6 +128,15 @@ if(HAVE_OPM_TESTS)
               $<TARGET_FILE:flow_adjoint> ${_m1d}/MODEL_1D_DEBUG.DATA
               ${_testout}/solver_m1d)
   endif()
+  # Group-control gradient: FD-verified on SPE1 under GCONPROD group
+  # control - proves the adjoint gradient is correct when wells follow a
+  # group target, not just single-well control (the field-relevant case).
+  set(_grpctrl ${OPM_TESTS_ROOT}/adjoint_tests/SPE1_GRPCTRL/SPE1_GRPCTRL.DATA)
+  if(EXISTS ${_grpctrl})
+    add_test(NAME adjoint_fd_grpctrl
+      COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-fd-grpctrl-test.sh
+              $<TARGET_FILE:flow_adjoint> ${_grpctrl} ${_testout}/fd_grpctrl)
+  endif()
   if(EXISTS ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA)
     add_test(NAME adjoint_replay_spe1
       COMMAND ${PROJECT_SOURCE_DIR}/tests/run-adjoint-replay-test.sh

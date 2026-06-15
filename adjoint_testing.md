@@ -374,6 +374,28 @@ control). It is a well-defined follow-up milestone, not a quick fix; the
 v1 scope (SPE1/SPE9-class: single-region controls, no group hierarchy or
 well events) is solid and fully verified.
 
+### Group control — gradient FD-verified (field-relevant)
+
+`SPE1_GRPCTRL` (SPE1 with the producer under GCONPROD group control,
+per-cell PORO) converges fixed-step and **replays 120/120 bitwise**. The
+adjoint porosity gradient (pressure-average objective) is FD-verified
+against central differences:
+
+| cell | rel. err |
+|---|---|
+| 0   | 3.3e-3 |
+| 50  | 2.0e-4 |
+| 100 | 3.0e-3 |
+| 150 | 2.2e-3 |
+| 220 | 1.9e-2 |
+
+`tests/run-adjoint-fd-grpctrl-test.sh`, ctest `adjoint_fd_grpctrl`. This
+is the proof that the adjoint gradient is correct when wells follow a
+group target (guide-rate allocation), not only single-well control - the
+field-relevant case. (The FD signal is small for a constant group rate
+target, so the test uses delta 1e-3 and tightened tolerances to stay
+above solver noise.)
+
 ### Jutul status
 
 Setup struggled on Julia 1.12 (slow stack precompilation). Full setup
