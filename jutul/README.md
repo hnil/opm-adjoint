@@ -127,6 +127,18 @@ the meaningful check.
 
 ## Gradient cross-check (T6 stage 2, 2026-06-13)
 
+**Quick start** — one command runs both codes and compares:
+```bash
+jutul/run-gradient-comparison.sh <flow_adjoint> <CASE.DATA> <output-dir>
+# e.g.
+jutul/run-gradient-comparison.sh \
+    builds/release/opm-adjoint/flow_adjoint \
+    ../opm-tests/spe1/SPE1CASE1.DATA /tmp/gradcmp
+```
+It prints the Pearson correlation, the sign agreement on the dominant
+cells, and the best-fit scale. On SPE1: correlation 0.80, sign 30/30.
+
+
 `jutul/compare_spe1_pv.jl` computes the JutulDarcy adjoint gradient of the
 final-step average reservoir pressure w.r.t. porosity on SPE1CASE1, via
 `reservoir_sensitivities(case, result, G; include_parameters=true)` ->
