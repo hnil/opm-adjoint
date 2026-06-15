@@ -205,11 +205,18 @@ public:
             captureBdiag_(meta.dt);
         }
 
-        // Install the converged state of substep k.
-        model_().solution(/*timeIdx=*/0) = convergedSolution;
-        wellModel_().prepareDeserialize(meta.reportStep);
-        archive_->read(wellModel_(), AdjointGroups::substep(k), "wgstate");
-        model_().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+        // Install the FULL converged state of substep k. Restoring the
+        // whole simulator snapshot (not just the WGState) brings back the
+        // well-model guide rates and the summary state in addition to the
+        // well/group state - all of which the control-equation assembly
+        // reads (getGroupProductionControl uses the group state AND the
+        // guide rates). The snapshot stores solution(0)=x_k and
+        // solution(1)=x_{k-1}, so the storage term R(x_k, x_{k-1}) is
+        // reproduced; the Bdiag cross term was already captured above.
+        static_cast<void>(convergedSolution);
+        loadSnapshot_(k, meta.reportStep);
+        simulator_.setTime(meta.startTime);
+        simulator_.setTimeStepSize(meta.dt);
 
         // Final linearization at the converged point. Assemble the well
         // equations from the restored converged controls WITHOUT

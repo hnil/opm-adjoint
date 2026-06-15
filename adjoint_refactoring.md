@@ -175,24 +175,31 @@ Verified with a fast group-control repro
 
 - **Result-neutral on the verified envelope**: m1d, SPE1 (123/123) and
   SPE9 (21/21) stay bitwise; full suite 14/14. The forward is untouched.
-- **Group control improved**: the re-run-advance path gave a Jacobian rel
-  diff of ~7e-2 and a residual rel diff of ~1.0 (garbage); the new path
-  brings the **Jacobian to ~1.6e-3** — the well-local derivatives are now
-  reproduced. The remaining gap is the **residual**, i.e. the
-  group-derived well *target* in the control equation: it is set during
-  the skipped `updateWellControls` from the group state, so the restored
-  well/group state does not yet fully reconstruct it. That is the next
-  increment (carry the converged per-well effective target in the bundle,
-  or restore it into `well_state` so the control equation uses it).
+- **Group control essentially works now.** The control-equation target
+  for a group-controlled well is recomputed during assembly
+  (`getGroupProductionControl`, `WellAssemble.cpp:171`) from the group
+  state *and the guide rates* — and the guide rates were stale (the
+  install restored only the WGState, not the well-model `guideRate_`).
+  Restoring the **full** snapshot-k state in the install (the whole
+  `Simulator::serializeOp`, which brings back `guideRate_` and the summary
+  state) closes it: on the model2 group-control repro **every report step
+  after the first now replays bitwise (residual/Jacobian rel diff 0.0)**.
+  Only the very first report step (well/guide-rate startup transient)
+  remains non-bitwise, with *tiny* absolute residuals (~1e-4, vs ~3e-2
+  before — a 100x reduction; the ~1.0 *relative* diff is an artifact of
+  the converged residual being ~1e-7). Still result-neutral on the
+  verified envelope (m1d, SPE1 123/123, SPE9 21/21 bitwise; suite 14/14).
 - **Norne** no longer crashes in the advance; the crash moved into the
   well-local recompute (`prepareWellsBeforeAssembling`/
   `updatePrimaryVariables` still do a shut-well name lookup). Handling
-  shut wells in the recompute is the other remaining increment.
+  shut wells in the recompute is a separate increment.
 
 So Stage 1's keystone — a forward-neutral "assemble at restored controls"
-entry point — is in place and correct for the well-local part. What
-remains for field decks: (i) reconstruct the group-derived well target,
-(ii) make the well-local recompute shut-well-safe.
+entry point fed by the full restored state — is in place and reproduces
+group-controlled decks bitwise except the initial report step. What
+remains for field decks: (i) the first-report-step startup transient
+(small, well-scoped), (ii) make the well-local recompute shut-well-safe
+for Norne.
 
 ## 4. Why this is the right shape
 
