@@ -123,3 +123,36 @@ oil-rate objective on a producer that switches control mid-run. The
 `run-jutul-forward-compare.sh` PASS/FAIL on shape-normalized curves is
 therefore informational; the unit-reconciled point comparison above is
 the meaningful check.
+
+
+## Gradient cross-check (T6 stage 2, 2026-06-13)
+
+`jutul/compare_spe1_pv.jl` computes the JutulDarcy adjoint gradient of the
+final-step average reservoir pressure w.r.t. porosity on SPE1CASE1, via
+`reservoir_sensitivities(case, result, G; include_parameters=true)` ->
+`sens[:porosity]`. Compared against the opm-adjoint gradient
+(`dJ/dporo_i = g_pvmult_i / poro_i` from
+`SPE1CASE1.ADJOINT_GRADIENTS_PV.txt`, poro = 0.3):
+
+- **Pearson correlation 0.80**, sign-consistent on all dominant cells;
+  best-fit scale OPM ~ 0.54 x Jutul.
+
+The agreement is a pattern/sign cross-check, not a tight match, for known
+reasons: the two forward runs already differ in the well model
+(connection factor / control-switch timing, see above), and the
+"average pressure" objective is defined on different pressure variables
+(OPM uses the pressure primary variable = oil pressure; Jutul uses the
+reservoir reference pressure). The authoritative quantitative check
+remains the in-tree central-difference test (opm-adjoint matches FD to
+~1e-4); JutulDarcy is the independent-implementation sanity check, and it
+confirms the opm-adjoint gradient has the right structure and sign.
+
+Run:
+```bash
+# OPM side
+flow_adjoint SPE1CASE1.DATA --enable-storage-cache=false \
+  --enable-adaptive-time-stepping=false --adjoint-objective=pressure-average --adjoint-save=true
+flow_adjoint SPE1CASE1.DATA ... --adjoint-mode=gradient
+# Jutul side
+julia +lts --project=jutul jutul/compare_spe1_pv.jl SPE1CASE1.DATA jutul_poro.csv
+```

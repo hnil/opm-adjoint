@@ -121,7 +121,7 @@ end
 
 Adjoint sensitivities of `objective` with respect to all differentiable
 model parameters (Jutul's parameter-AD machinery). Returns the
-data-domain sensitivity object; e.g. `sens[:model][:porosity]` for the
+data-domain sensitivity object; e.g. `sens[:porosity]` and `sens[:permeability]` for the
 porosity gradient. Compare with the opm-adjoint
 `<CASE>.ADJOINT_GRADIENTS_PV.txt` via
 dJ/dporo_i = g_pvmult_i / poro_i.
