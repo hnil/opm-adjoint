@@ -189,17 +189,29 @@ Verified with a fast group-control repro
   before — a 100x reduction; the ~1.0 *relative* diff is an artifact of
   the converged residual being ~1e-7). Still result-neutral on the
   verified envelope (m1d, SPE1 123/123, SPE9 21/21 bitwise; suite 14/14).
-- **Norne** no longer crashes in the advance; the crash moved into the
-  well-local recompute (`prepareWellsBeforeAssembling`/
-  `updatePrimaryVariables` still do a shut-well name lookup). Handling
-  shut wells in the recompute is a separate increment.
+- **Norne now replays end-to-end (DONE).** The well-local recompute
+  crash was `prepareWellsBeforeAssembling`, which runs well-operability /
+  inner-iteration *decisions* (it can stop wells) and does a shut-well
+  name lookup — that is forward-only advance logic, not assembly, and is
+  not needed once `updatePrimaryVariables` has set the well primary
+  variables from the restored state. Dropping it from
+  `assembleWellEqGivenControls` makes the recompute shut-well-safe.
+  Result: the full Norne deck (44431 cells, 36 wells, group control +
+  shut wells, hysteresis, VAPOIL, faults) replays to completion, and
+  with `--adjoint-save-system` the re-linearized system matches the
+  stored forward system: **~90% of substeps bitwise (294/329), ~96%
+  within 1e-3**; the ~11 larger deviations (up to ~0.5 abs) are at the
+  known-hard points — the first report step's startup transient,
+  well-event boundaries, and hysteresis-update steps — all documented v1
+  approximations. Still result-neutral: SPE1 123/123, SPE9 21/21 bitwise,
+  suite 14/14; the forward `assemble()` is unchanged.
 
 So Stage 1's keystone — a forward-neutral "assemble at restored controls"
 entry point fed by the full restored state — is in place and reproduces
-group-controlled decks bitwise except the initial report step. What
-remains for field decks: (i) the first-report-step startup transient
-(small, well-scoped), (ii) make the well-local recompute shut-well-safe
-for Norne.
+group-controlled **and** shut-well field decks. What remains for *bitwise*
+field replay: the first-report-step startup transient and the
+hysteresis/well-event boundary steps (small, localized; the gradient is
+already accurate since most substeps are exact).
 
 ## 4. Why this is the right shape
 
