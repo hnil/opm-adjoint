@@ -222,7 +222,7 @@ public:
         // equations from the restored converged controls WITHOUT
         // re-deriving the control/group/network/guide-rate state (which
         // does not reproduce the forward's converged values and crashes on
-        // shut wells); recompute only the well-local quantities.
+        // shut wells); recompute only the well primary variables.
         wellModel_().assembleWellEqGivenControls(meta.dt);
         model_().linearizer().linearizeDomain();
 
