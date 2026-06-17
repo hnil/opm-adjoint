@@ -311,3 +311,34 @@ group control. Norne-class field decks replay end-to-end (~90% bitwise).
   reproduced by restoring `guideRate_` alone;
 - multisegment wells / networks / compositional / thermal / solvent /
   polymer (out of the v1 black-oil + standard-well scope by design).
+
+## 6. Catalog of explicitly-updated quantities (and how the adjoint treats them)
+
+A number of quantities are updated *explicitly* in the forward run
+(between iterations or steps) rather than being solved implicitly. The
+adjoint handles each of three ways. The end-of-run scan
+(`AdjointDeckWarnings.hpp`, printed after every gradient/replay run)
+detects the ones present in the deck and warns; the tags below match the
+warning tags.
+
+| Quantity | Where updated | Replay (J) | Gradient (dJ/dm) | Warning tag |
+|---|---|---|---|---|
+| Saturation hysteresis (HYSTER) | `endTimeStep` (max/min sat in materialLawManager) | **exact** (state serialized) | cross-term neglected | `approx-gradient` |
+| DRSDT / DRVDT (active, max>0) | `endTimeStep` (mixControls_ max Rs/Rv rate) | **exact** (cache-free storage) | cross-term neglected | `approx-gradient` |
+| VAPPARS | `endTimeStep` | **exact** | cross-term neglected | `approx-gradient` |
+| DRSDT/DRVDT **0** (frozen Rs/Rv) | — | **exact** | **exact** (no rate-dependent term) | none (not flagged) |
+| Rock compaction (poro/trans mult from pressure history) | `endTimeStep` | exact (serialized) | cross-term neglected | *(not yet auto-detected)* |
+| Max-oil / max-water saturation tracking | `endTimeStep` | exact | neglected | *(not yet auto-detected)* |
+| Well explicit quantities (F0_ wellbore storage, connection pressures, explicit B) | `prepareTimeStep` | exact (restored from snapshot) | known cross-term neglected | *(not yet auto-detected)* |
+| **Reservoir-volume / voidage-replacement group control (RESV/VREP/REIN)** | `updateWellControlsAndNetwork` (group voidage target) | **not bitwise** — the effective control target is re-derived from reservoir voidage during the replay assembly | approximate | `approx-replay` |
+| Single-rate / guide-rate group control (ORAT/GRAT/WRAT/LRAT, GRUP) | `updateWellControlsAndNetwork` | **exact** (verified bitwise on gconprod/gconinje/grupcntl/model4) | **exact** (FD-verified, SPE1_GRPCTRL) | none |
+| Well control-mode switching | during Newton | exact (converged controls in WGState) | kinks at switches are real objective non-smoothness, not a bug | none |
+| Aquifers | aquifer `endTimeStep` | **inexact** (aquifer contributions not assembled in replay) | neglected | `neglected` |
+| Extended network (NODEPROP/BRANPROP) | `updateWellControlsAndNetwork` | inexact | neglected | `neglected` |
+
+The `approx-gradient` group is the principled v1 trade-off: the forward
+*state* is serialized so the residual/Jacobian (hence J) is reproduced
+bitwise, but the cross-step derivative of the explicitly-updated quantity
+is dropped from dJ/dm. The `approx-replay` and `neglected` groups are
+where the replay itself is not bitwise — the targets for closing them are
+in `adjoint_refactoring.md` (the voidage case is folded into Stage 2).

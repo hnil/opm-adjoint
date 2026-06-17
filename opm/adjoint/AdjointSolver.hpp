@@ -49,6 +49,7 @@
 #include <opm/adjoint/AdjointLinearSolver.hpp>
 #include <opm/adjoint/AdjointObjective.hpp>
 #include <opm/adjoint/AdjointParallel.hpp>
+#include <opm/adjoint/AdjointDeckWarnings.hpp>
 #include <opm/adjoint/AdjointReplay.hpp>
 
 #include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
@@ -265,6 +266,7 @@ public:
         reportTiming_(numSubsteps);
 
         writeResults_(objectiveValue);
+        warnAdjointDeckApproximations(simulator_);
         return replayFailures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 

@@ -206,12 +206,52 @@ Verified with a fast group-control repro
   approximations. Still result-neutral: SPE1 123/123, SPE9 21/21 bitwise,
   suite 14/14; the forward `assemble()` is unchanged.
 
+(Note: `prepareWellsBeforeAssembling` was subsequently **dropped** from
+`assembleWellEqGivenControls` — it runs well-operability / inner-iteration
+*decisions* and does a shut-well name lookup that is forward-only advance
+logic, not assembly; the method is now just `updatePrimaryVariables` +
+`assembleWellEqWithoutIteration` + `updateCellRates`, which is what made
+the Norne shut-well replay safe.)
+
 So Stage 1's keystone — a forward-neutral "assemble at restored controls"
 entry point fed by the full restored state — is in place and reproduces
-group-controlled **and** shut-well field decks. What remains for *bitwise*
-field replay: the first-report-step startup transient and the
-hysteresis/well-event boundary steps (small, localized; the gradient is
-already accurate since most substeps are exact).
+group-controlled **and** shut-well field decks.
+
+### 3b. The remaining inexact case folds into Stage 2: voidage-replacement control
+
+A stress test across opm-tests decks found one class that still does not
+replay bitwise: **reservoir-volume / voidage-replacement group control**
+(`GCONINJE … VREP`, `GCONPROD … RESV`, `REIN`; the `wgrupcon` deck). The
+deviation is systematic across the early substeps (~0.9 abs, then resolves
+to bitwise) — i.e. the control *target* is wrong, not the reservoir.
+
+Mechanism: `assembleControlEqInj` (`WellAssemble.cpp:256`) **re-derives**
+the injection target from `group_state.production_rates`, the
+`rateConverter()` (region-average surface↔voidage coefficients), and the
+guide-rate allocation — none of which is the *single stored effective
+target*. Restoring the rate converter from the converged state and
+recomputing the group data were both tried and **did not** close it, which
+is the point: the target is a function of several derived quantities whose
+exact reconstruction is fragile.
+
+This is exactly what **Stage 2** fixes. Today the assembly re-derives the
+control target (summary state, group voidage, guide rates) instead of
+reading a stored effective target. Folding voidage replacement into Stage
+2 means: when the bundle carries the **converged effective control target
+per well** (the value the forward's control equation actually used), the
+assembly reads it directly — `R_ctrl = rate − T_stored` — and there is
+nothing to re-derive, so RESV/VREP/REIN become bitwise like ORAT/GRUP.
+Concretely, extend the `WellAssemblyState` bundle (§2 Stage 1) with a
+per-well `effective_control_target` and route
+`assembleControlEqInj`/`assembleControlEqProd` to read it from the bundle
+in replay (forward still computes it the same way, so it is result-neutral
+by the §0 guarantee). Until then the end-of-run scan
+(`AdjointDeckWarnings.hpp`) flags such decks with the `approx-replay` tag.
+
+What remains for fully-bitwise field replay: this voidage-replacement
+target (Stage 2), plus the small first-report-step startup transient and
+the hysteresis/well-event boundary steps (localized; the gradient is
+already accurate since the vast majority of substeps are exact).
 
 ## 4. Why this is the right shape
 

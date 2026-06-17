@@ -44,6 +44,7 @@
 #include <opm/adjoint/AdjointMeta.hpp>
 #include <opm/adjoint/AdjointParameters.hpp>
 #include <opm/adjoint/AdjointStorage.hpp>
+#include <opm/adjoint/AdjointDeckWarnings.hpp>
 #include <opm/adjoint/AdjointSystemIO.hpp>
 
 #include <dune/common/fmatrix.hh>
@@ -137,6 +138,7 @@ public:
                          "against; record with --adjoint-save-system=true for "
                          "verification)");
         }
+        warnAdjointDeckApproximations(simulator_);
         return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
