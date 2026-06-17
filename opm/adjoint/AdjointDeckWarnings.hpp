@@ -105,26 +105,30 @@ inline void warnAdjointDeckApproximations(const Simulator& simulator)
             "cross-term in dJ/dm is neglected");
     }
 
-    // --- reservoir-volume / voidage-replacement group control ---
-    bool voidage = false;
-    for (std::size_t i = 0; i < nstep && !voidage; ++i) {
+    // --- group control: voidage replacement (replay-inexact) and
+    //     guide-rate allocation (replay-exact, gradient-inexact) ---
+    bool voidage = false;     // RESV/VREP/REIN target re-derived in replay
+    bool guideRate = false;   // any active group control => guide-rate sharing
+    for (std::size_t i = 0; i < nstep && (!voidage || !guideRate); ++i) {
         for (const auto& gname : schedule.groupNames(i)) {
             const auto& group = schedule.getGroup(gname, i);
             for (const auto& [phase, props] : group.injectionProperties()) {
                 static_cast<void>(phase);
                 using IM = Group::InjectionCMode;
+                if (props.cmode != IM::NONE) {
+                    guideRate = true;
+                }
                 if (props.cmode == IM::VREP || props.cmode == IM::RESV ||
                     props.cmode == IM::REIN) {
                     voidage = true;
-                    break;
                 }
             }
-            if (!voidage &&
-                group.productionProperties().cmode == Group::ProductionCMode::RESV) {
-                voidage = true;
+            const auto pcmode = group.productionProperties().cmode;
+            if (pcmode != Group::ProductionCMode::NONE) {
+                guideRate = true;
             }
-            if (voidage) {
-                break;
+            if (pcmode == Group::ProductionCMode::RESV) {
+                voidage = true;
             }
         }
     }
@@ -135,6 +139,14 @@ inline void warnAdjointDeckApproximations(const Simulator& simulator)
             "the effective control target is re-derived from reservoir "
             "voidage during the replay assembly and may not reproduce the "
             "forward bitwise; the gradient is correspondingly approximate");
+    }
+    if (guideRate) {
+        approxGradient.emplace_back(
+            "guide-rate group control allocation",
+            "the group target is shared among members by guide rates computed "
+            "from well potentials; the converged guide rates are restored so "
+            "replay is exact, but the d(guide-rate)/d(state) cross-term in "
+            "dJ/dm is neglected");
     }
 
     // --- neglected entirely ---
@@ -166,6 +178,16 @@ inline void warnAdjointDeckApproximations(const Simulator& simulator)
     append(approxGradient, "approx-gradient");
     append(approxReplay, "approx-replay");
     append(neglected, "neglected");
+    // Standing caveat: every multi-connection well carries explicitly-updated
+    // quantities (hydrostatic connection pressure drop from prior-state perf
+    // densities, wellbore-storage F0_, explicit B-factors). These are
+    // recomputed exactly in replay (so J is exact), but their cross-step
+    // derivative is neglected in dJ/dm. Printed only when something else is
+    // already non-exact, to avoid flagging every deck.
+    msg += "  [approx-gradient] well explicit quantities (connection "
+           "hydrostatic pressure drop, wellbore-storage F0, explicit "
+           "B-factors): recomputed exactly in replay; the cross-step "
+           "derivative is neglected in dJ/dm.\n";
     msg += "  Replay and gradients are exact for everything else (FD-verified: "
            "porosity/PV, transmissibility, permeability, end-point scaling, "
            "well and group control).";

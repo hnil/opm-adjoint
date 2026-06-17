@@ -328,10 +328,11 @@ warning tags.
 | VAPPARS | `endTimeStep` | **exact** | cross-term neglected | `approx-gradient` |
 | DRSDT/DRVDT **0** (frozen Rs/Rv) | — | **exact** | **exact** (no rate-dependent term) | none (not flagged) |
 | Rock compaction (poro/trans mult from pressure history) | `endTimeStep` | exact (serialized) | cross-term neglected | *(not yet auto-detected)* |
-| Max-oil / max-water saturation tracking | `endTimeStep` | exact | neglected | *(not yet auto-detected)* |
-| Well explicit quantities (F0_ wellbore storage, connection pressures, explicit B) | `prepareTimeStep` | exact (restored from snapshot) | known cross-term neglected | *(not yet auto-detected)* |
+| Max-oil / max-water saturation tracking (drives VAPPARS) | `updateMaxOilSaturation_` in `endTimeStep` | exact | neglected | via `VAPPARS` (`approx-gradient`) |
+| Well explicit quantities (F0_ wellbore storage, connection hydrostatic pressure drop from prior-state perf densities, explicit B) | `prepareTimeStep` / `computePropertiesForPressures` (`StandardWellConnections.cpp:230`) | exact (recomputed from state k−1) | known cross-term neglected | `approx-gradient` (standing note, printed whenever any other item fires) |
+| Guide-rate group control allocation (target shared among members by guide rates from well potentials) | `BlackoilWellModelGeneric.cpp:1595` `computePotentials` → `updateGuideRates` | **exact** (converged guide rates restored, verified bitwise on gconprod/gconinje/grupcntl/model4) | d(guide-rate)/d(state) cross-term neglected — **negligible/zero for single-member or guide-rate-insensitive groups** (why `adjoint_fd_grpctrl` on SPE1_GRPCTRL still passes); can be material when ≥2 members share a target | `approx-gradient` |
 | **Reservoir-volume / voidage-replacement group control (RESV/VREP/REIN)** | `updateWellControlsAndNetwork` (group voidage target) | **not bitwise** — the effective control target is re-derived from reservoir voidage during the replay assembly | approximate | `approx-replay` |
-| Single-rate / guide-rate group control (ORAT/GRAT/WRAT/LRAT, GRUP) | `updateWellControlsAndNetwork` | **exact** (verified bitwise on gconprod/gconinje/grupcntl/model4) | **exact** (FD-verified, SPE1_GRPCTRL) | none |
+| Single-rate group control (ORAT/GRAT/WRAT/LRAT, GRUP) | `updateWellControlsAndNetwork` | **exact** (verified bitwise on gconprod/gconinje/grupcntl/model4) | exact apart from the guide-rate cross-term above | guide-rate row |
 | Well control-mode switching | during Newton | exact (converged controls in WGState) | kinks at switches are real objective non-smoothness, not a bug | none |
 | Aquifers | aquifer `endTimeStep` | **inexact** (aquifer contributions not assembled in replay) | neglected | `neglected` |
 | Extended network (NODEPROP/BRANPROP) | `updateWellControlsAndNetwork` | inexact | neglected | `neglected` |
