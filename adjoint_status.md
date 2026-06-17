@@ -266,3 +266,48 @@ of well-control *advancement* from well-residual *assembly*, with a
 single serializable assembly-input bundle. Until that lands, group-
 controlled decks are out of scope, and the §3.6 tactical capture can
 unblock a specific deck if needed.
+
+## 5. Stress-test coverage (2026-06-15)
+
+Forward-record + bitwise replay (`--adjoint-save-system`, system compared
+at 1e-12) across a range of standard-well 3-phase black-oil decks from
+opm-tests. "report-0 transient" = the only non-bitwise substeps are in
+the first report step, with tiny absolute residuals (~1e-4 down to
+~1e-9); these are the documented startup/explicit-update approximation
+and do not affect gradients (the group-control gradient FD-passes
+regardless).
+
+| deck | cells | feature exercised | replay |
+|---|---|---|---|
+| MODEL_1D_DEBUG | 3 | basics | bitwise (FD-verified) |
+| SPE1CASE1 | 300 | basics | 123/123 bitwise |
+| SPE1_GRPCTRL | 300 | **group control** | 120/120 bitwise (gradient FD-verified) |
+| wconprod | 300 | well control | 7/7 bitwise |
+| spe3 | 324 | VAPOIL+DISGAS | 175/179 (report-0 transient, abs ≤1e-6) |
+| minpv | 1652 | MINPV | 1/1 bitwise |
+| grupcntl | 2794 | **group control** | 11/11 bitwise |
+| model4 | 3042 | **group control** | 106/106 bitwise |
+| gconprod | 6000 | **group control** + ENDSCALE | 25/25 bitwise |
+| gconinje | 6000 | **group injection control** | 12/12 bitwise |
+| SPE9_CP_SHORT | 9000 | multi-perforation wells | 21/21 bitwise |
+| Norne | 44431 | group ctrl + shut wells + hyst + VAPOIL + faults | end-to-end, ~90% bitwise |
+| editnnc | 210 | NNCs | report-0 transient only (abs ≤1e-4) |
+| mult | 210 | region multipliers | report-0 transient only (abs ≤1e-5) |
+
+**Conclusion — what works now:** plain black-oil with standard wells,
+single-well *and* group control (GCONPROD/GCONINJE/GRUPCNTL), well
+open/shut events, NNCs, region multipliers, ENDSCALE, MINPV, multi-
+perforation wells, serial and MPI — all replay bitwise (the few report-0
+startup substeps aside), and the gradients are FD-verified for porosity,
+transmissibility, permeability, end-point scaling, well controls, and
+group control. Norne-class field decks replay end-to-end (~90% bitwise).
+
+**Known remaining (not bitwise):**
+- the first-report-step startup transient on some decks (small, localized,
+  gradient-irrelevant — likely the explicit DRSDT/VAPPARS/initial-potential
+  update at step 0);
+- **WGRUPCON guide-rate definitions** (`wgrupcon` deck: report steps
+  3/5/7 deviate by ~1.0) — the guide-rate *re-definition* timing is not
+  reproduced by restoring `guideRate_` alone;
+- multisegment wells / networks / compositional / thermal / solvent /
+  polymer (out of the v1 black-oil + standard-well scope by design).
