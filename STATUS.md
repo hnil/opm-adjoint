@@ -34,10 +34,76 @@ decks up to field models, and is guarded by a green ctest suite (**15/15**).
 |---|---|
 | **Milestone A — exact backward replay** | SPE1 123/123, SPE9 21/21, MODEL_1D_DEBUG 7/7, SPE1_GRPCTRL 120/120 **bitwise**. Full **Norne** (44 431 cells, 36 wells, group ctrl + shut wells, hysteresis, VAPOIL, faults) replays **end-to-end**, ~90 % bitwise (remainder at well-event / hysteresis boundaries — documented v1 approximation). |
 | **Milestone B — adjoint solve** | Backward Lagrange sweep, Schur-reduced, UMFPACK on the transposed system; iterative solves (ilu0 / cpr / **cprt**); **MPI** parallel record/replay + transposed solve (cross-rank transpose bug found & fixed). |
-| **Milestone C — parameter gradients (all FD-verified)** | PV / pvmult, transmissibility / tmult, **perm** (half-trans chain rule), **well-control dJ/du** (the original 2019 goal), **end-point scaling**. |
-| **Objectives** | pressure-average, BHP, well-curve matching (`matchref` / `matchsum` via `ESmry`), multi-term. |
-| **Tests** | ctest **15/15**; FD-verified golden-reference regression set in `tests/references/`. |
+| **Milestone C — parameter gradients (all FD-verified)** | see the derivatives table below. |
+| **Tests** | ctest **15/15**; FD-verified golden-reference regression set in `tests/references/`; per-eps FD accuracy study in [`tests/FD_ACCURACY.md`](tests/FD_ACCURACY.md). |
 | **JutulDarcy cross-check** | Set up (`jutul/`); pattern/sign-level agreement (forwards differ by well model). FD remains the authoritative oracle. |
+
+### Objective functions (`--adjoint-objective=`)
+
+Per-substep sum objectives `J = Σₖ Jₖ(xₖ, xwₖ)` (Jutul-style interface):
+
+| selector | definition | use |
+|---|---|---|
+| `pressure-average` | `(1/N) Σᵢ pᵢ` at the **final** substep (mean cell pressure) | reservoir-state validation |
+| `bhp:<WELL>` | `Σₖ dtₖ · BHP_WELL(xₖ)` (time-integrated BHP) | well-curve / control objectives |
+| `rate:<WELL>:<phase>` | `Σₖ dtₖ · q` (time-integrated rate) | production/injection totals |
+| `match:<WELL>:<phase>:<target>` | `Σₖ dtₖ (q − target)²` | match a constant target |
+| `matchref:<WELL>:<phase>:<refcase>` | `Σₖ dtₖ (q − q_obs(t))²`, `q_obs` from a reference `ESmry`, time-interpolated | well-curve history matching |
+| `matchsum:<refcase>:<W>.<p>[+<W>.<p>…]` | sum of `matchref` terms over several well/phase pairs | multi-term misfit |
+
+### Derivatives (parameters, all FD-verified)
+
+The right column is the gradient **mechanism** — how `dR/dp` (the residual
+sensitivity contracted with the adjoint λ) is obtained. Three different routes;
+end-point scaling is the odd one out (see [Code structure](#code-structure--how-gradients-are-computed)).
+
+| derivative w.r.t. | parameter / keyword | gradient mechanism |
+|---|---|---|
+| porosity / pore volume | per-cell φ, MULTPV | **analytic** — storage linear in PV, `g += λ·(V/dt)(Sₙ−Sₙ₋₁)` |
+| transmissibility | per-face MULTX / face T | **analytic** — TPFA flux linear in T, `g += (λ_I−λ_J)·flux` |
+| permeability | per-cell PERMX/Y/Z | **analytic + chain rule** — post-process the trans gradient through half-transmissibilities |
+| end-point scaling | SWL…SGU, KRW/KRG/KRORW/KRORG, PCW/PCG | **residual finite-difference** — perturb the scaled end point, *re-evaluate the local residual*, contract with λ_r **and** λ_w |
+| well control | per-well rate/BHP target u | **well-equation row** — `dJ/du = −Σₖ λ_w,ₖ[last]` (control equation) |
+
+### Code structure — how gradients are computed
+
+The backward sweep lives in [`AdjointSolver.hpp`](opm/adjoint/AdjointSolver.hpp);
+per accepted substep k it (1) re-linearizes the converged system via
+[`AdjointReplay.hpp`](opm/adjoint/AdjointReplay.hpp), (2) solves the transposed
+adjoint system `Aᵀλₖ = −(dJ/dx)ᵀ − Bdiagᵀλₖ₊₁`
+([`AdjointLinearSolver.hpp`](opm/adjoint/AdjointLinearSolver.hpp)), then (3)
+accumulates parameter gradients. Step 3 uses **three distinct mechanisms**:
+
+1. **Analytic accumulation** — PV, transmissibility (and permeability as a
+   chain-rule post-process). `dR/dp` is known in closed form (storage is linear
+   in the PV multiplier, the TPFA flux linear in the trans multiplier), so the
+   gradient is a plain inner product `λ·(dR/dp)` using the storage/flux values
+   already computed at the converged point — no extra residual evaluation.
+   (`accumulateGradients_`, `gatherPermGradients_`).
+2. **Residual finite-difference** — end-point scaling
+   ([`AdjointEndpointGradients.hpp`](opm/adjoint/AdjointEndpointGradients.hpp),
+   `accumulateEndpointGradients_`). Here the parameter enters through the
+   saturation-function scaling deep inside the material law, with **no closed-form
+   `dR/dp`**. So for each requested end point of each cell the code perturbs the
+   scaled point by ±h, re-derives the scaled drainage curves, recomputes the
+   cell's intensive quantities at xₖ and xₖ₋₁ through the public
+   `IntensiveQuantities::update`, re-evaluates the cell's storage and its faces'
+   fluxes with the TPFA kernels, and central-differences the residual:
+   `dJ/dθ_i += λ_i·dR_i + Σ_faces λ_J·dR_J`. This is a numerical derivative of
+   the **local** residual (cell-local, no global solve), contracted with both the
+   reservoir adjoint λ_r and the well adjoint λ_w (relperm reaches the
+   perforation source term). It is the "different residual evaluation" — distinct
+   from the analytic paths, and the reason end-point FD verification needs
+   explicitly-initialized decks (the initial-state-via-equilibration cross-term
+   is not included).
+3. **Well-equation row** — well-control dJ/du
+   ([`computeWellAdjoints_`](opm/adjoint/AdjointSolver.hpp)). The control target
+   appears directly in the last well-equation row (`R = rate|bhp − target`), so
+   `dJ/du = −Σₖ λ_w,ₖ[last]`; no residual re-evaluation at all.
+
+Objectives are assembled separately in
+[`AdjointObjective.hpp`](opm/adjoint/AdjointObjective.hpp) (the `dJ/dx` /
+`dJ/dxw` right-hand-side terms).
 
 ### Key design decisions
 
